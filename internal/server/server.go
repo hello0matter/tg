@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tgworkbench/internal/aiprocessor"
+	"tgworkbench/internal/connector"
 	"tgworkbench/internal/domain"
 	"tgworkbench/internal/rules"
 	"tgworkbench/internal/startup"
@@ -22,6 +23,8 @@ import (
 )
 
 type Runtime interface {
+	Descriptors() []connector.Descriptor
+	CreateAccount(input domain.AccountInput) (domain.Account, error)
 	Connect(accountID string) error
 	Disconnect(accountID string) error
 	SubmitCode(accountID, code string) error
@@ -50,6 +53,7 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("GET /api/dashboard", s.dashboard)
+	mux.HandleFunc("GET /api/connectors", s.connectors)
 	mux.HandleFunc("GET /api/accounts", s.accounts)
 	mux.HandleFunc("POST /api/accounts", s.createAccount)
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.deleteAccount)
@@ -84,6 +88,9 @@ func (s *Server) dashboard(w http.ResponseWriter, _ *http.Request) {
 	value, err := s.store.Dashboard()
 	respond(w, value, err)
 }
+func (s *Server) connectors(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, s.runtime.Descriptors())
+}
 func (s *Server) accounts(w http.ResponseWriter, _ *http.Request) {
 	value, err := s.store.ListAccounts()
 	respond(w, value, err)
@@ -102,20 +109,16 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	input.Name, input.Phone = strings.TrimSpace(input.Name), strings.TrimSpace(input.Phone)
-	if input.Name == "" || input.Phone == "" || input.APIID <= 0 || len(input.APIHash) < 8 {
-		writeError(w, http.StatusBadRequest, "名称、手机号、API ID 和 API Hash 均为必填项")
+	account, err := s.runtime.CreateAccount(input)
+	if err == nil {
+		s.record("info", "account", "已添加 "+account.Platform+" 账号 "+account.Name, "")
+		writeJSON(w, http.StatusCreated, account)
 		return
 	}
-	encrypted, err := s.vault.Encrypt(input.APIHash)
-	if err == nil {
-		var account domain.Account
-		account, err = s.store.SaveAccount(input, encrypted)
-		if err == nil {
-			s.record("info", "account", "已添加 Telegram 账号 "+account.Name, "")
-			writeJSON(w, http.StatusCreated, account)
-			return
-		}
+	var inputErr connector.InputError
+	if errors.As(err, &inputErr) {
+		writeError(w, http.StatusBadRequest, inputErr.Error())
+		return
 	}
 	writeInternal(w, err)
 }
@@ -124,7 +127,7 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	_ = s.runtime.Disconnect(r.PathValue("id"))
 	err := s.store.DeleteAccount(r.PathValue("id"))
 	if err == nil {
-		s.record("info", "account", "已删除 Telegram 账号", "")
+		s.record("info", "account", "已删除平台账号", "")
 	}
 	respondEmpty(w, err)
 }
@@ -164,14 +167,27 @@ func validateRoute(route *domain.Route) error {
 		return errors.New("线路名称不能为空")
 	}
 	if route.AccountID == "" {
-		return errors.New("请选择 Telegram 账号")
+		return errors.New("请选择监听账号")
 	}
 	if len(route.Sources) == 0 || len(route.Targets) == 0 {
 		return errors.New("至少需要一个来源和一个目标")
 	}
+	for i := range route.Sources {
+		if route.Sources[i].Platform == "" {
+			route.Sources[i].Platform = connector.Telegram
+		}
+		if route.Sources[i].ConnectorID == "" {
+			route.Sources[i].ConnectorID = route.AccountID
+		}
+	}
+	for i := range route.Targets {
+		if route.Targets[i].Platform == "" {
+			route.Targets[i].Platform = connector.Telegram
+		}
+	}
 	for _, source := range route.Sources {
 		for _, target := range route.Targets {
-			if source.ChatID == target.ChatID && source.TopicID == target.TopicID {
+			if source.Platform == target.Platform && source.ChatID == target.ChatID && source.TopicID == target.TopicID {
 				return errors.New("来源和目标不能相同")
 			}
 		}

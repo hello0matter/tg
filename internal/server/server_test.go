@@ -8,10 +8,18 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"tgworkbench/internal/connector"
 	"tgworkbench/internal/domain"
 )
 
 type stubRuntime struct{}
+
+func (stubRuntime) Descriptors() []connector.Descriptor {
+	return []connector.Descriptor{{Platform: connector.Telegram, Available: true}}
+}
+func (stubRuntime) CreateAccount(domain.AccountInput) (domain.Account, error) {
+	return domain.Account{}, nil
+}
 
 func (stubRuntime) Connect(string) error                       { return nil }
 func (stubRuntime) Disconnect(string) error                    { return nil }

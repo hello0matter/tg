@@ -26,6 +26,7 @@ import (
 	"golang.org/x/net/proxy"
 
 	"tgworkbench/internal/aiprocessor"
+	"tgworkbench/internal/connector"
 	"tgworkbench/internal/domain"
 	"tgworkbench/internal/rules"
 	"tgworkbench/internal/store"
@@ -106,6 +107,56 @@ func NewManager(dataDir string, store *store.Store, vault *vault.Vault, log *slo
 		go manager.outboxWorker(queueCtx)
 	}
 	return manager
+}
+
+func (m *Manager) Descriptor() connector.Descriptor {
+	return connector.Descriptor{
+		Platform:  connector.Telegram,
+		Name:      "Telegram 用户账号",
+		Available: true,
+		Capabilities: connector.Capabilities{
+			Text: true, Media: true, Albums: true, Edits: true, Deletes: true,
+			Threads: true, URLButtons: true, UserSessions: true,
+		},
+		Credentials: []connector.CredentialField{
+			{Key: "phone", Label: "手机号", Kind: "text", Required: true, Placeholder: "+86..."},
+			{Key: "apiId", Label: "API ID", Kind: "number", Required: true},
+			{Key: "apiHash", Label: "API Hash", Kind: "password", Secret: true, Required: true},
+		},
+	}
+}
+
+func (m *Manager) CreateAccount(input domain.AccountInput) (domain.Account, error) {
+	input.Name = strings.TrimSpace(input.Name)
+	if input.Phone == "" {
+		input.Phone = input.ConnectorConfig["phone"]
+	}
+	if input.APIID <= 0 {
+		input.APIID, _ = strconv.Atoi(input.ConnectorConfig["apiId"])
+	}
+	input.Phone = strings.TrimSpace(input.Phone)
+	if input.Platform == "" {
+		input.Platform = connector.Telegram
+	}
+	if input.Platform != connector.Telegram {
+		return domain.Account{}, connector.InputError{Message: "Telegram Connector 不能创建其他平台账号"}
+	}
+	if input.APIHash == "" {
+		input.APIHash = input.ConnectorSecrets["apiHash"]
+	}
+	if input.Name == "" || input.Phone == "" || input.APIID <= 0 || len(input.APIHash) < 8 {
+		return domain.Account{}, connector.InputError{Message: "名称、手机号、API ID 和 API Hash 均为必填项"}
+	}
+	if input.ConnectorConfig == nil {
+		input.ConnectorConfig = make(map[string]string)
+	}
+	input.ConnectorConfig["phone"] = input.Phone
+	input.ConnectorConfig["apiId"] = strconv.Itoa(input.APIID)
+	encrypted, err := m.vault.Encrypt(input.APIHash)
+	if err != nil {
+		return domain.Account{}, err
+	}
+	return m.store.SaveAccount(input, encrypted)
 }
 
 func (m *Manager) Connect(accountID string) error {
@@ -333,10 +384,18 @@ func (m *Manager) enqueueText(route domain.Route, text string, buttons []domain.
 	}
 	jobs := make([]domain.OutboxJob, 0, len(route.Targets))
 	for _, target := range route.Targets {
+		platform := target.Platform
+		if platform == "" {
+			platform = connector.Telegram
+		}
+		targetAccountIDs := accountIDs
+		if target.ConnectorID != "" {
+			targetAccountIDs = []string{target.ConnectorID}
+		}
 		job := domain.OutboxJob{
-			RouteID: route.ID, RouteName: route.Name, Target: target, Text: text, Buttons: buttons,
-			SenderAccountIDs: accountIDs,
-			OrderKey:         fmt.Sprintf("%d:%d", target.ChatID, target.TopicID),
+			RouteID: route.ID, RouteName: route.Name, Platform: platform, Target: target, Text: text, Buttons: buttons,
+			SenderAccountIDs: targetAccountIDs,
+			OrderKey:         fmt.Sprintf("%s:%d:%d", platform, target.ChatID, target.TopicID),
 		}
 		if source != nil {
 			job.SourceChatID, job.SourceMessageID = source.chatID, source.messageID
@@ -360,7 +419,7 @@ func (m *Manager) outboxWorker(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
-		job, err := m.store.ClaimOutbox(2 * time.Minute)
+		job, err := m.store.ClaimOutbox(connector.Telegram, 2*time.Minute)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
@@ -559,14 +618,14 @@ func (s *accountSession) cache(users []tg.UserClass, chats []tg.ChatClass) {
 			if title == "" {
 				title = user.Username
 			}
-			s.info[user.ID] = domain.PeerRef{ChatID: user.ID, Title: title, Kind: "user"}
+			s.info[user.ID] = domain.PeerRef{Platform: connector.Telegram, ConnectorID: s.accountID, ChatID: user.ID, Title: title, Kind: "user"}
 		}
 	}
 	for _, raw := range chats {
 		switch chat := raw.(type) {
 		case *tg.Chat:
 			s.peers[-chat.ID] = &tg.InputPeerChat{ChatID: chat.ID}
-			s.info[-chat.ID] = domain.PeerRef{ChatID: -chat.ID, Title: chat.Title, Kind: "group"}
+			s.info[-chat.ID] = domain.PeerRef{Platform: connector.Telegram, ConnectorID: s.accountID, ChatID: -chat.ID, Title: chat.Title, Kind: "group"}
 		case *tg.Channel:
 			id := -channelIDOffset - chat.ID
 			s.peers[id] = &tg.InputPeerChannel{ChannelID: chat.ID, AccessHash: chat.AccessHash}
@@ -574,7 +633,7 @@ func (s *accountSession) cache(users []tg.UserClass, chats []tg.ChatClass) {
 			if chat.Megagroup {
 				kind = "group"
 			}
-			s.info[id] = domain.PeerRef{ChatID: id, Title: chat.Title, Kind: kind}
+			s.info[id] = domain.PeerRef{Platform: connector.Telegram, ConnectorID: s.accountID, ChatID: id, Title: chat.Title, Kind: kind}
 		}
 	}
 }
@@ -774,9 +833,12 @@ func (m *Manager) processAlbum(ctx context.Context, pending *pendingAlbum) error
 	for i, msg := range pending.messages {
 		original[i] = msg.Message
 		result := m.engine.Apply(domain.MessageEnvelope{
+			Platform: connector.Telegram, AccountID: pending.session.accountID,
 			RouteID: pending.route.ID, SourceChatID: peerID(msg.PeerID), SourceMsgID: msg.ID,
 			TopicID: messageTopic(msg), SenderName: senderName(msg.FromID, pending.entities),
-			MessageType: classifyMessage(msg), Caption: msg.Message,
+			MessageType: classifyMessage(msg), Caption: msg.Message, ReplyToID: replyMessageID(msg),
+			ThreadKey: threadKey(peerID(msg.PeerID), messageTopic(msg)), Buttons: normalizedButtons(msg.ReplyMarkup),
+			Attachments: normalizedAttachments(msg),
 		}, configured)
 		if pending.route.AIEnabled && result.Decision == "send" && strings.TrimSpace(result.Caption) != "" {
 			aiResult, _, err := m.applyAI(ctx, pending.route, result.Caption)
@@ -904,6 +966,8 @@ func (m *Manager) processRoute(ctx context.Context, s *accountSession, route dom
 	messageType := classifyMessage(msg)
 	senderID := peerID(msg.FromID)
 	envelope := domain.MessageEnvelope{
+		Platform:     connector.Telegram,
+		AccountID:    s.accountID,
 		RouteID:      route.ID,
 		SourceChatID: chatID,
 		SourceMsgID:  msg.ID,
@@ -911,6 +975,10 @@ func (m *Manager) processRoute(ctx context.Context, s *accountSession, route dom
 		SenderID:     senderID,
 		SenderName:   senderName(msg.FromID, entities),
 		MessageType:  messageType,
+		ReplyToID:    replyMessageID(msg),
+		ThreadKey:    threadKey(chatID, topicID),
+		Buttons:      normalizedButtons(msg.ReplyMarkup),
+		Attachments:  normalizedAttachments(msg),
 	}
 	if messageType == "text" {
 		envelope.Text = msg.Message
@@ -1032,32 +1100,82 @@ func formatButtons(markup tg.ReplyMarkupClass, policy string) string {
 	if markup == nil || policy == "drop" {
 		return ""
 	}
+	lines := make([]string, 0)
+	for _, button := range normalizedButtons(markup) {
+		if button.URL != "" {
+			lines = append(lines, strings.TrimSpace(button.Text+" "+button.URL))
+		} else if policy == "as_text" && button.Text != "" {
+			lines = append(lines, "[按钮] "+button.Text)
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func normalizedButtons(markup tg.ReplyMarkupClass) []domain.ButtonLink {
 	rows, ok := markup.(interface{ GetRows() []tg.KeyboardButtonRow })
 	if !ok {
-		return ""
+		return nil
 	}
-	lines := make([]string, 0)
+	result := make([]domain.ButtonLink, 0)
 	for _, row := range rows.GetRows() {
 		for _, raw := range row.Buttons {
-			text := ""
+			button := domain.ButtonLink{}
 			if named, ok := raw.(interface{ GetText() string }); ok {
-				text = strings.TrimSpace(named.GetText())
+				button.Text = strings.TrimSpace(named.GetText())
 			}
-			switch button := raw.(type) {
+			switch value := raw.(type) {
 			case *tg.KeyboardButtonURL:
-				lines = append(lines, strings.TrimSpace(text+" "+button.URL))
+				button.URL = value.URL
 			case *tg.KeyboardButtonWebView:
-				lines = append(lines, strings.TrimSpace(text+" "+button.URL))
+				button.URL = value.URL
 			case *tg.KeyboardButtonSimpleWebView:
-				lines = append(lines, strings.TrimSpace(text+" "+button.URL))
-			default:
-				if policy == "as_text" && text != "" {
-					lines = append(lines, "[按钮] "+text)
+				button.URL = value.URL
+			}
+			if button.Text != "" || button.URL != "" {
+				result = append(result, button)
+			}
+		}
+	}
+	return result
+}
+
+func normalizedAttachments(msg *tg.Message) []domain.Attachment {
+	messageType := classifyMessage(msg)
+	if messageType == "text" {
+		return nil
+	}
+	attachment := domain.Attachment{Kind: messageType}
+	switch media := msg.Media.(type) {
+	case *tg.MessageMediaPhoto:
+		if photo, ok := media.Photo.(*tg.Photo); ok {
+			attachment.Ref = strconv.FormatInt(photo.ID, 10)
+		}
+	case *tg.MessageMediaDocument:
+		if document, ok := media.Document.(*tg.Document); ok {
+			attachment.Ref = strconv.FormatInt(document.ID, 10)
+			attachment.MimeType = document.MimeType
+			attachment.Size = document.Size
+			for _, attribute := range document.Attributes {
+				if filename, ok := attribute.(*tg.DocumentAttributeFilename); ok {
+					attachment.FileName = filename.FileName
+					break
 				}
 			}
 		}
 	}
-	return strings.Join(lines, "\n")
+	return []domain.Attachment{attachment}
+}
+
+func replyMessageID(msg *tg.Message) string {
+	header, ok := msg.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok || header.ReplyToMsgID == 0 {
+		return ""
+	}
+	return strconv.Itoa(header.ReplyToMsgID)
+}
+
+func threadKey(chatID int64, topicID int) string {
+	return fmt.Sprintf("%s:%d:%d", connector.Telegram, chatID, topicID)
 }
 
 func albumHasButtons(messages []*tg.Message) bool {
@@ -1087,9 +1205,12 @@ func (m *Manager) handleEditedMessage(ctx context.Context, s *accountSession, en
 		}
 		messageType := classifyMessage(msg)
 		envelope := domain.MessageEnvelope{
+			Platform: connector.Telegram, AccountID: s.accountID,
 			RouteID: route.ID, SourceChatID: chatID, SourceMsgID: msg.ID,
 			TopicID: messageTopic(msg), SenderName: senderName(msg.FromID, entities),
-			MessageType: messageType,
+			MessageType: messageType, ReplyToID: replyMessageID(msg),
+			ThreadKey: threadKey(chatID, messageTopic(msg)), Buttons: normalizedButtons(msg.ReplyMarkup),
+			Attachments: normalizedAttachments(msg),
 		}
 		if messageType == "text" {
 			envelope.Text = msg.Message

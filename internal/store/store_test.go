@@ -19,9 +19,13 @@ func TestRouteAndRuleRoundTrip(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 
-	account, err := s.SaveAccount(domain.AccountInput{Name: "客服号", Phone: "+8613800000000", APIID: 123}, []byte("encrypted"))
+	account, err := s.SaveAccount(domain.AccountInput{Name: "客服号", Phone: "+8613800000000", APIID: 123, ConnectorConfig: map[string]string{"region": "cn"}}, []byte("encrypted"))
 	if err != nil {
 		t.Fatal(err)
+	}
+	accounts, err := s.ListAccounts()
+	if err != nil || len(accounts) != 1 || accounts[0].Platform != domain.PlatformTelegram || accounts[0].Config["region"] != "cn" || !accounts[0].HasConnectorSecret {
+		t.Fatalf("unexpected accounts: %#v, %v", accounts, err)
 	}
 	route, err := s.SaveRoute(domain.Route{
 		Name:             "商品群镜像",
@@ -46,7 +50,7 @@ func TestRouteAndRuleRoundTrip(t *testing.T) {
 	}
 
 	routes, err := s.ListRoutes()
-	if err != nil || len(routes) != 1 || routes[0].Sources[0].TopicID != 2 || routes[0].SenderAccountIDs[1] != "backup" || routes[0].AllowedSenderIDs[0] != 42 || routes[0].AIPrompt != "replace supplier brand" {
+	if err != nil || len(routes) != 1 || routes[0].Sources[0].TopicID != 2 || routes[0].Sources[0].Platform != domain.PlatformTelegram || routes[0].SenderAccountIDs[1] != "backup" || routes[0].AllowedSenderIDs[0] != 42 || routes[0].AIPrompt != "replace supplier brand" {
 		t.Fatalf("unexpected routes: %#v, %v", routes, err)
 	}
 	rules, err := s.ListRules(route.ID)
@@ -70,22 +74,44 @@ func TestOutboxPreservesOrderPerTarget(t *testing.T) {
 	if err := s.EnqueueOutbox(jobs); err != nil {
 		t.Fatal(err)
 	}
-	first, err := s.ClaimOutbox(time.Minute)
+	first, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute)
 	if err != nil || first.Text != "first" {
 		t.Fatalf("first claim = %#v, %v", first, err)
 	}
-	parallel, err := s.ClaimOutbox(time.Minute)
+	parallel, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute)
 	if err != nil || parallel.Text != "parallel" {
 		t.Fatalf("parallel claim = %#v, %v", parallel, err)
 	}
-	if _, err := s.ClaimOutbox(time.Minute); !errors.Is(err, sql.ErrNoRows) {
+	if _, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("blocked claim error = %v", err)
 	}
 	if err := s.CompleteOutbox(first.ID, "a"); err != nil {
 		t.Fatal(err)
 	}
-	second, err := s.ClaimOutbox(time.Minute)
+	second, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute)
 	if err != nil || second.Text != "second" {
 		t.Fatalf("second claim = %#v, %v", second, err)
+	}
+}
+
+func TestOutboxClaimsOnlyRequestedPlatform(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.EnqueueOutbox([]domain.OutboxJob{{
+		Platform: "webhook", RouteID: "r", Target: domain.PeerRef{Platform: "webhook", ChatID: 1},
+		Text: "hello", OrderKey: "webhook:1", DedupeKey: "webhook-job", SenderAccountIDs: []string{"a"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("telegram claimed webhook job: %v", err)
+	}
+	job, err := s.ClaimOutbox("webhook", time.Minute)
+	if err != nil || job.Platform != "webhook" {
+		t.Fatalf("webhook claim = %#v, %v", job, err)
 	}
 }

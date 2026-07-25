@@ -39,9 +39,10 @@ func (s *Store) Close() error { return s.db.Close() }
 func (s *Store) migrate() error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS accounts (
-  id TEXT PRIMARY KEY, name TEXT NOT NULL, phone TEXT NOT NULL, api_id INTEGER NOT NULL,
+  id TEXT PRIMARY KEY, platform TEXT NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, api_id INTEGER NOT NULL,
   api_hash BLOB NOT NULL, status TEXT NOT NULL, username TEXT NOT NULL DEFAULT '', user_id INTEGER NOT NULL DEFAULT 0,
-  last_error TEXT NOT NULL DEFAULT '', connected_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+  last_error TEXT NOT NULL DEFAULT '', connected_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL,
+  connector_config_json TEXT NOT NULL DEFAULT '{}', connector_secret BLOB NOT NULL DEFAULT X''
 );
 CREATE TABLE IF NOT EXISTS routes (
   id TEXT PRIMARY KEY, name TEXT NOT NULL, account_id TEXT NOT NULL, sources_json TEXT NOT NULL,
@@ -75,7 +76,7 @@ CREATE TABLE IF NOT EXISTS message_map (
   PRIMARY KEY(route_id, source_chat_id, source_message_id, target_chat_id)
 );
 CREATE TABLE IF NOT EXISTS outbox_jobs (
-  id TEXT PRIMARY KEY, route_id TEXT NOT NULL, route_name TEXT NOT NULL, target_json TEXT NOT NULL,
+  id TEXT PRIMARY KEY, route_id TEXT NOT NULL, route_name TEXT NOT NULL, platform TEXT NOT NULL, target_json TEXT NOT NULL,
   text TEXT NOT NULL, buttons_json TEXT NOT NULL, source_chat_id INTEGER NOT NULL,
   source_message_id INTEGER NOT NULL, sender_accounts_json TEXT NOT NULL, order_key TEXT NOT NULL,
   dedupe_key TEXT NOT NULL UNIQUE, random_id INTEGER NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL,
@@ -86,6 +87,21 @@ CREATE TABLE IF NOT EXISTS outbox_jobs (
 		return fmt.Errorf("migrate database: %w", err)
 	}
 	if err := s.ensureColumn("routes", "config_json", `TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("accounts", "platform", `TEXT NOT NULL DEFAULT 'telegram'`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("accounts", "connector_config_json", `TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("accounts", "connector_secret", `BLOB NOT NULL DEFAULT X''`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE accounts SET connector_secret=api_hash WHERE length(connector_secret)=0 AND length(api_hash)>0`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("outbox_jobs", "platform", `TEXT NOT NULL DEFAULT 'telegram'`); err != nil {
 		return err
 	}
 	if err := s.ensureColumn("message_map", "sender_account_id", `TEXT NOT NULL DEFAULT ''`); err != nil {
@@ -152,13 +168,20 @@ func parseTime(value string) time.Time {
 
 func (s *Store) SaveAccount(input domain.AccountInput, encryptedHash []byte) (domain.Account, error) {
 	now := nowText()
-	a := domain.Account{ID: id.New(), Name: input.Name, Phone: input.Phone, APIID: input.APIID, HasAPIHash: len(encryptedHash) > 0, Status: "disconnected", CreatedAt: parseTime(now)}
-	_, err := s.db.Exec(`INSERT INTO accounts(id,name,phone,api_id,api_hash,status,created_at) VALUES(?,?,?,?,?,?,?)`, a.ID, a.Name, a.Phone, a.APIID, encryptedHash, a.Status, now)
+	if input.Platform == "" {
+		input.Platform = domain.PlatformTelegram
+	}
+	config, err := encode(input.ConnectorConfig)
+	if err != nil {
+		return domain.Account{}, err
+	}
+	a := domain.Account{ID: id.New(), Platform: input.Platform, Name: input.Name, Phone: input.Phone, APIID: input.APIID, Config: input.ConnectorConfig, HasAPIHash: len(encryptedHash) > 0, HasConnectorSecret: len(encryptedHash) > 0, Status: "disconnected", CreatedAt: parseTime(now)}
+	_, err = s.db.Exec(`INSERT INTO accounts(id,platform,name,phone,api_id,api_hash,status,created_at,connector_config_json,connector_secret) VALUES(?,?,?,?,?,?,?,?,?,?)`, a.ID, a.Platform, a.Name, a.Phone, a.APIID, encryptedHash, a.Status, now, config, encryptedHash)
 	return a, err
 }
 
 func (s *Store) ListAccounts() ([]domain.Account, error) {
-	rows, err := s.db.Query(`SELECT id,name,phone,api_id,length(api_hash)>0,status,username,user_id,last_error,connected_at,created_at FROM accounts ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT id,platform,name,phone,api_id,length(api_hash)>0,length(connector_secret)>0,connector_config_json,status,username,user_id,last_error,connected_at,created_at FROM accounts ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -166,8 +189,11 @@ func (s *Store) ListAccounts() ([]domain.Account, error) {
 	result := make([]domain.Account, 0)
 	for rows.Next() {
 		var a domain.Account
-		var connected, created string
-		if err := rows.Scan(&a.ID, &a.Name, &a.Phone, &a.APIID, &a.HasAPIHash, &a.Status, &a.Username, &a.UserID, &a.LastError, &connected, &created); err != nil {
+		var config, connected, created string
+		if err := rows.Scan(&a.ID, &a.Platform, &a.Name, &a.Phone, &a.APIID, &a.HasAPIHash, &a.HasConnectorSecret, &config, &a.Status, &a.Username, &a.UserID, &a.LastError, &connected, &created); err != nil {
+			return nil, err
+		}
+		if err := decode(config, &a.Config); err != nil {
 			return nil, err
 		}
 		a.ConnectedAt, a.CreatedAt = parseTime(connected), parseTime(created)
@@ -179,12 +205,26 @@ func (s *Store) ListAccounts() ([]domain.Account, error) {
 func (s *Store) AccountCredentials(accountID string) (domain.Account, []byte, error) {
 	var a domain.Account
 	var encrypted []byte
-	var connected, created string
-	err := s.db.QueryRow(`SELECT id,name,phone,api_id,api_hash,status,username,user_id,last_error,connected_at,created_at FROM accounts WHERE id=?`, accountID).
-		Scan(&a.ID, &a.Name, &a.Phone, &a.APIID, &encrypted, &a.Status, &a.Username, &a.UserID, &a.LastError, &connected, &created)
+	var config, connected, created string
+	err := s.db.QueryRow(`SELECT id,platform,name,phone,api_id,api_hash,length(connector_secret)>0,connector_config_json,status,username,user_id,last_error,connected_at,created_at FROM accounts WHERE id=?`, accountID).
+		Scan(&a.ID, &a.Platform, &a.Name, &a.Phone, &a.APIID, &encrypted, &a.HasConnectorSecret, &config, &a.Status, &a.Username, &a.UserID, &a.LastError, &connected, &created)
+	if err == nil {
+		err = decode(config, &a.Config)
+	}
 	a.HasAPIHash = len(encrypted) > 0
 	a.ConnectedAt, a.CreatedAt = parseTime(connected), parseTime(created)
 	return a, encrypted, err
+}
+
+func (s *Store) ConnectorCredentials(accountID string) (domain.Account, []byte, error) {
+	account, _, err := s.AccountCredentials(accountID)
+	if err != nil {
+		return account, nil, err
+	}
+	var encrypted []byte
+	err = s.db.QueryRow(`SELECT connector_secret FROM accounts WHERE id=?`, accountID).Scan(&encrypted)
+	account.HasConnectorSecret = len(encrypted) > 0
+	return account, encrypted, err
 }
 
 func (s *Store) UpdateAccountStatus(accountID, status, username, lastError string, userID int64) error {
@@ -243,6 +283,19 @@ func (s *Store) ListRoutes() ([]domain.Route, error) {
 		}
 		if err := decode(targets, &r.Targets); err != nil {
 			return nil, err
+		}
+		for i := range r.Sources {
+			if r.Sources[i].Platform == "" {
+				r.Sources[i].Platform = domain.PlatformTelegram
+			}
+			if r.Sources[i].ConnectorID == "" {
+				r.Sources[i].ConnectorID = r.AccountID
+			}
+		}
+		for i := range r.Targets {
+			if r.Targets[i].Platform == "" {
+				r.Targets[i].Platform = domain.PlatformTelegram
+			}
 		}
 		var config routeConfig
 		if err := decode(configRaw, &config); err != nil {
@@ -535,6 +588,15 @@ func (s *Store) EnqueueOutbox(jobs []domain.OutboxJob) error {
 		if job.ID == "" {
 			job.ID = id.New()
 		}
+		if job.Platform == "" {
+			job.Platform = job.Target.Platform
+		}
+		if job.Platform == "" {
+			job.Platform = domain.PlatformTelegram
+		}
+		if job.Target.Platform == "" {
+			job.Target.Platform = job.Platform
+		}
 		target, err := encode(job.Target)
 		if err != nil {
 			return err
@@ -553,8 +615,8 @@ func (s *Store) EnqueueOutbox(jobs []domain.OutboxJob) error {
 		if job.RandomID == 0 {
 			job.RandomID = rand.Int64()
 		}
-		_, err = tx.Exec(`INSERT OR IGNORE INTO outbox_jobs(id,route_id,route_name,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'pending',0,'','',?,'',?,?)`,
-			job.ID, job.RouteID, job.RouteName, target, job.Text, buttons, job.SourceChatID, job.SourceMessageID, accounts, job.OrderKey, job.DedupeKey, job.RandomID, now, now, now)
+		_, err = tx.Exec(`INSERT OR IGNORE INTO outbox_jobs(id,route_id,route_name,platform,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?, 'pending',0,'','',?,'',?,?)`,
+			job.ID, job.RouteID, job.RouteName, job.Platform, target, job.Text, buttons, job.SourceChatID, job.SourceMessageID, accounts, job.OrderKey, job.DedupeKey, job.RandomID, now, now, now)
 		if err != nil {
 			return err
 		}
@@ -562,16 +624,19 @@ func (s *Store) EnqueueOutbox(jobs []domain.OutboxJob) error {
 	return tx.Commit()
 }
 
-func (s *Store) ClaimOutbox(lease time.Duration) (domain.OutboxJob, error) {
+func (s *Store) ClaimOutbox(platform string, lease time.Duration) (domain.OutboxJob, error) {
+	if platform == "" {
+		platform = domain.PlatformTelegram
+	}
 	now := time.Now().UTC()
 	leaseUntil := now.Add(lease).Format(time.RFC3339Nano)
 	row := s.db.QueryRow(`UPDATE outbox_jobs SET status='processing',lease_until=?,updated_at=? WHERE id=(
 SELECT candidate.id FROM outbox_jobs candidate WHERE
- ((candidate.status='pending' AND candidate.available_at<=?) OR (candidate.status='processing' AND candidate.lease_until<>'' AND candidate.lease_until<?))
+ candidate.platform=? AND ((candidate.status='pending' AND candidate.available_at<=?) OR (candidate.status='processing' AND candidate.lease_until<>'' AND candidate.lease_until<?))
  AND NOT EXISTS (SELECT 1 FROM outbox_jobs earlier WHERE earlier.order_key=candidate.order_key AND earlier.rowid<candidate.rowid AND earlier.status IN ('pending','processing'))
  ORDER BY candidate.available_at,candidate.created_at LIMIT 1
-) RETURNING id,route_id,route_name,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at`,
-		leaseUntil, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+) RETURNING id,route_id,route_name,platform,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at`,
+		leaseUntil, now.Format(time.RFC3339Nano), platform, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	return scanOutbox(row)
 }
 
@@ -582,7 +647,7 @@ type rowScanner interface {
 func scanOutbox(row rowScanner) (domain.OutboxJob, error) {
 	var job domain.OutboxJob
 	var target, buttons, accounts, available, lease, created, updated string
-	err := row.Scan(&job.ID, &job.RouteID, &job.RouteName, &target, &job.Text, &buttons, &job.SourceChatID, &job.SourceMessageID, &accounts, &job.OrderKey, &job.DedupeKey, &job.RandomID, &job.Status, &job.Attempts, &job.AssignedAccountID, &job.LastError, &available, &lease, &created, &updated)
+	err := row.Scan(&job.ID, &job.RouteID, &job.RouteName, &job.Platform, &target, &job.Text, &buttons, &job.SourceChatID, &job.SourceMessageID, &accounts, &job.OrderKey, &job.DedupeKey, &job.RandomID, &job.Status, &job.Attempts, &job.AssignedAccountID, &job.LastError, &available, &lease, &created, &updated)
 	if err != nil {
 		return job, err
 	}
@@ -638,7 +703,7 @@ func (s *Store) ListOutbox(status string, limit int) ([]domain.OutboxJob, error)
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	query := `SELECT id,route_id,route_name,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at FROM outbox_jobs`
+	query := `SELECT id,route_id,route_name,platform,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at FROM outbox_jobs`
 	args := []any{}
 	if status != "" {
 		query += ` WHERE status=?`

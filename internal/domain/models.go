@@ -2,32 +2,42 @@ package domain
 
 import "time"
 
+const PlatformTelegram = "telegram"
+
 type Account struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Phone       string    `json:"phone"`
-	APIID       int       `json:"apiId"`
-	HasAPIHash  bool      `json:"hasApiHash"`
-	Status      string    `json:"status"`
-	Username    string    `json:"username"`
-	UserID      int64     `json:"userId"`
-	LastError   string    `json:"lastError"`
-	ConnectedAt time.Time `json:"connectedAt"`
-	CreatedAt   time.Time `json:"createdAt"`
+	ID                 string            `json:"id"`
+	Platform           string            `json:"platform"`
+	Name               string            `json:"name"`
+	Phone              string            `json:"phone"`
+	APIID              int               `json:"apiId"`
+	Config             map[string]string `json:"connectorConfig"`
+	HasConnectorSecret bool              `json:"hasConnectorSecret"`
+	HasAPIHash         bool              `json:"hasApiHash"`
+	Status             string            `json:"status"`
+	Username           string            `json:"username"`
+	UserID             int64             `json:"userId"`
+	LastError          string            `json:"lastError"`
+	ConnectedAt        time.Time         `json:"connectedAt"`
+	CreatedAt          time.Time         `json:"createdAt"`
 }
 
 type AccountInput struct {
-	Name    string `json:"name"`
-	Phone   string `json:"phone"`
-	APIID   int    `json:"apiId"`
-	APIHash string `json:"apiHash"`
+	Platform         string            `json:"platform"`
+	Name             string            `json:"name"`
+	Phone            string            `json:"phone"`
+	APIID            int               `json:"apiId"`
+	APIHash          string            `json:"apiHash"`
+	ConnectorConfig  map[string]string `json:"connectorConfig"`
+	ConnectorSecrets map[string]string `json:"connectorSecrets"`
 }
 
 type PeerRef struct {
-	ChatID  int64  `json:"chatId"`
-	TopicID int    `json:"topicId"`
-	Title   string `json:"title"`
-	Kind    string `json:"kind"`
+	Platform    string `json:"platform"`
+	ConnectorID string `json:"connectorId"`
+	ChatID      int64  `json:"chatId"`
+	TopicID     int    `json:"topicId"`
+	Title       string `json:"title"`
+	Kind        string `json:"kind"`
 }
 
 type Route struct {
@@ -69,6 +79,8 @@ type Rule struct {
 }
 
 type MessageEnvelope struct {
+	Platform     string            `json:"platform"`
+	AccountID    string            `json:"accountId"`
 	RouteID      string            `json:"routeId"`
 	SourceChatID int64             `json:"sourceChatId"`
 	SourceMsgID  int               `json:"sourceMessageId"`
@@ -79,6 +91,18 @@ type MessageEnvelope struct {
 	Text         string            `json:"text"`
 	Caption      string            `json:"caption"`
 	Metadata     map[string]string `json:"metadata"`
+	ReplyToID    string            `json:"replyToId"`
+	ThreadKey    string            `json:"threadKey"`
+	Buttons      []ButtonLink      `json:"buttons"`
+	Attachments  []Attachment      `json:"attachments"`
+}
+
+type Attachment struct {
+	Kind     string `json:"kind"`
+	MimeType string `json:"mimeType"`
+	FileName string `json:"fileName"`
+	Size     int64  `json:"size"`
+	Ref      string `json:"ref"`
 }
 
 type TransformResult struct {
@@ -165,6 +189,7 @@ type OutboxJob struct {
 	ID                string       `json:"id"`
 	RouteID           string       `json:"routeId"`
 	RouteName         string       `json:"routeName"`
+	Platform          string       `json:"platform"`
 	Target            PeerRef      `json:"target"`
 	Text              string       `json:"text"`
 	Buttons           []ButtonLink `json:"buttons"`

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"tgworkbench/internal/connector"
 	"tgworkbench/internal/runtime"
 	"tgworkbench/internal/server"
 	"tgworkbench/internal/store"
@@ -55,11 +56,13 @@ func main() {
 	fatalIf(log, err)
 	tgRuntime := runtime.NewManager(dataDir, db, secure, log)
 	defer tgRuntime.Close()
-	app := server.New(db, secure, tgRuntime, assets, log)
+	connectors := connector.NewRegistry(db)
+	fatalIf(log, connectors.Register(tgRuntime))
+	app := server.New(db, secure, connectors, assets, log)
 	accounts, err := db.ListAccounts()
 	fatalIf(log, err)
 	for _, account := range accounts {
-		if err := tgRuntime.Connect(account.ID); err != nil {
+		if err := connectors.Connect(account.ID); err != nil {
 			log.Warn("restore Telegram account", "account", account.Name, "error", err)
 		}
 	}
