@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"time"
@@ -67,26 +68,72 @@ CREATE TABLE IF NOT EXISTS activities (
 );
 CREATE INDEX IF NOT EXISTS activities_created ON activities(created_at DESC);
 CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), value_json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS secrets (name TEXT PRIMARY KEY, value BLOB NOT NULL);
 CREATE TABLE IF NOT EXISTS message_map (
   route_id TEXT NOT NULL, source_chat_id INTEGER NOT NULL, source_message_id INTEGER NOT NULL,
   target_chat_id INTEGER NOT NULL, target_message_id INTEGER NOT NULL, created_at TEXT NOT NULL,
   PRIMARY KEY(route_id, source_chat_id, source_message_id, target_chat_id)
+);
+CREATE TABLE IF NOT EXISTS outbox_jobs (
+  id TEXT PRIMARY KEY, route_id TEXT NOT NULL, route_name TEXT NOT NULL, target_json TEXT NOT NULL,
+  text TEXT NOT NULL, buttons_json TEXT NOT NULL, source_chat_id INTEGER NOT NULL,
+  source_message_id INTEGER NOT NULL, sender_accounts_json TEXT NOT NULL, order_key TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL UNIQUE, random_id INTEGER NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL,
+  assigned_account_id TEXT NOT NULL, last_error TEXT NOT NULL, available_at TEXT NOT NULL,
+  lease_until TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );`
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate database: %w", err)
+	}
+	if err := s.ensureColumn("routes", "config_json", `TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("message_map", "sender_account_id", `TEXT NOT NULL DEFAULT ''`); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("outbox_jobs", "random_id", `INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE outbox_jobs SET random_id=random() WHERE random_id=0`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS outbox_ready ON outbox_jobs(status,available_at,created_at); CREATE INDEX IF NOT EXISTS outbox_order ON outbox_jobs(order_key,status,created_at);`); err != nil {
+		return err
 	}
 	var count int
 	if err := s.db.QueryRow("SELECT COUNT(*) FROM settings").Scan(&count); err != nil {
 		return err
 	}
 	if count == 0 {
-		settings := domain.Settings{ListenAddress: "127.0.0.1:8765", RetentionDays: 30, MediaCacheMB: 2048, OpenBrowser: true}
+		settings := domain.Settings{ListenAddress: "127.0.0.1:8765", RetentionDays: 30, MediaCacheMB: 2048, OpenBrowser: true, AI: domain.AISettings{BaseURL: "https://api.openai.com/v1", Model: "gpt-4.1-mini", TimeoutSeconds: 30, FailurePolicy: "review", MaxInputChars: 12000}}
 		if err := s.SaveSettings(settings); err != nil {
 			return err
 		}
 		return s.AddActivity(domain.Activity{Level: "info", Category: "system", Message: "工作台已初始化"})
 	}
 	return nil
+}
+
+func (s *Store) ensureColumn(table, column, definition string) error {
+	rows, err := s.db.Query(`PRAGMA table_info(` + table + `)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, kind string
+		var notNull, primaryKey int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	_, err = s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + definition)
+	return err
 }
 
 func encode(value any) (string, error) {
@@ -168,14 +215,18 @@ func (s *Store) SaveRoute(route domain.Route) (domain.Route, error) {
 	if err != nil {
 		return route, err
 	}
-	_, err = s.db.Exec(`INSERT INTO routes(id,name,account_id,sources_json,targets_json,mode,review_mode,enabled,sync_edits,sync_deletes,sync_reactions,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,account_id=excluded.account_id,sources_json=excluded.sources_json,targets_json=excluded.targets_json,mode=excluded.mode,review_mode=excluded.review_mode,enabled=excluded.enabled,sync_edits=excluded.sync_edits,sync_deletes=excluded.sync_deletes,sync_reactions=excluded.sync_reactions,updated_at=excluded.updated_at`,
-		route.ID, route.Name, route.AccountID, sources, targets, route.Mode, route.ReviewMode, route.Enabled, route.SyncEdits, route.SyncDeletes, route.SyncReactions, route.CreatedAt.UTC().Format(time.RFC3339Nano), now)
+	config, err := encode(routeConfigFrom(route))
+	if err != nil {
+		return route, err
+	}
+	_, err = s.db.Exec(`INSERT INTO routes(id,name,account_id,sources_json,targets_json,mode,review_mode,enabled,sync_edits,sync_deletes,sync_reactions,created_at,updated_at,config_json)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,account_id=excluded.account_id,sources_json=excluded.sources_json,targets_json=excluded.targets_json,mode=excluded.mode,review_mode=excluded.review_mode,enabled=excluded.enabled,sync_edits=excluded.sync_edits,sync_deletes=excluded.sync_deletes,sync_reactions=excluded.sync_reactions,updated_at=excluded.updated_at,config_json=excluded.config_json`,
+		route.ID, route.Name, route.AccountID, sources, targets, route.Mode, route.ReviewMode, route.Enabled, route.SyncEdits, route.SyncDeletes, route.SyncReactions, route.CreatedAt.UTC().Format(time.RFC3339Nano), now, config)
 	return route, err
 }
 
 func (s *Store) ListRoutes() ([]domain.Route, error) {
-	rows, err := s.db.Query(`SELECT id,name,account_id,sources_json,targets_json,mode,review_mode,enabled,sync_edits,sync_deletes,sync_reactions,created_at,updated_at FROM routes ORDER BY created_at`)
+	rows, err := s.db.Query(`SELECT id,name,account_id,sources_json,targets_json,mode,review_mode,enabled,sync_edits,sync_deletes,sync_reactions,created_at,updated_at,config_json FROM routes ORDER BY created_at`)
 	if err != nil {
 		return nil, err
 	}
@@ -183,8 +234,8 @@ func (s *Store) ListRoutes() ([]domain.Route, error) {
 	result := make([]domain.Route, 0)
 	for rows.Next() {
 		var r domain.Route
-		var sources, targets, created, updated string
-		if err := rows.Scan(&r.ID, &r.Name, &r.AccountID, &sources, &targets, &r.Mode, &r.ReviewMode, &r.Enabled, &r.SyncEdits, &r.SyncDeletes, &r.SyncReactions, &created, &updated); err != nil {
+		var sources, targets, created, updated, configRaw string
+		if err := rows.Scan(&r.ID, &r.Name, &r.AccountID, &sources, &targets, &r.Mode, &r.ReviewMode, &r.Enabled, &r.SyncEdits, &r.SyncDeletes, &r.SyncReactions, &created, &updated, &configRaw); err != nil {
 			return nil, err
 		}
 		if err := decode(sources, &r.Sources); err != nil {
@@ -193,10 +244,39 @@ func (s *Store) ListRoutes() ([]domain.Route, error) {
 		if err := decode(targets, &r.Targets); err != nil {
 			return nil, err
 		}
+		var config routeConfig
+		if err := decode(configRaw, &config); err != nil {
+			return nil, err
+		}
+		config.apply(&r)
 		r.CreatedAt, r.UpdatedAt = parseTime(created), parseTime(updated)
 		result = append(result, r)
 	}
 	return result, rows.Err()
+}
+
+type routeConfig struct {
+	SenderAccountIDs []string `json:"senderAccountIds"`
+	SenderFilterMode string   `json:"senderFilterMode"`
+	AllowedSenderIDs []int64  `json:"allowedSenderIds"`
+	IncludeBots      bool     `json:"includeBots"`
+	ButtonPolicy     string   `json:"buttonPolicy"`
+	AIEnabled        bool     `json:"aiEnabled"`
+	AIPrompt         string   `json:"aiPrompt"`
+}
+
+func routeConfigFrom(route domain.Route) routeConfig {
+	return routeConfig{SenderAccountIDs: route.SenderAccountIDs, SenderFilterMode: route.SenderFilterMode, AllowedSenderIDs: route.AllowedSenderIDs, IncludeBots: route.IncludeBots, ButtonPolicy: route.ButtonPolicy, AIEnabled: route.AIEnabled, AIPrompt: route.AIPrompt}
+}
+
+func (c routeConfig) apply(route *domain.Route) {
+	route.SenderAccountIDs = c.SenderAccountIDs
+	route.SenderFilterMode = c.SenderFilterMode
+	route.AllowedSenderIDs = c.AllowedSenderIDs
+	route.IncludeBots = c.IncludeBots
+	route.ButtonPolicy = c.ButtonPolicy
+	route.AIEnabled = c.AIEnabled
+	route.AIPrompt = c.AIPrompt
 }
 
 func (s *Store) Route(routeID string) (domain.Route, error) {
@@ -362,9 +442,26 @@ func (s *Store) Settings() (domain.Settings, error) {
 	if err == nil {
 		err = decode(raw, &value)
 	}
+	if value.AI.BaseURL == "" {
+		value.AI.BaseURL = "https://api.openai.com/v1"
+	}
+	if value.AI.Model == "" {
+		value.AI.Model = "gpt-4.1-mini"
+	}
+	if value.AI.TimeoutSeconds == 0 {
+		value.AI.TimeoutSeconds = 30
+	}
+	if value.AI.FailurePolicy == "" {
+		value.AI.FailurePolicy = "review"
+	}
+	if value.AI.MaxInputChars == 0 {
+		value.AI.MaxInputChars = 12000
+	}
 	return value, err
 }
 func (s *Store) SaveSettings(value domain.Settings) error {
+	value.AI.APIKey = ""
+	value.AI.HasAPIKey = false
 	raw, err := encode(value)
 	if err != nil {
 		return err
@@ -373,17 +470,33 @@ func (s *Store) SaveSettings(value domain.Settings) error {
 	return err
 }
 
+func (s *Store) SaveSecret(name string, value []byte) error {
+	_, err := s.db.Exec(`INSERT INTO secrets(name,value) VALUES(?,?) ON CONFLICT(name) DO UPDATE SET value=excluded.value`, name, value)
+	return err
+}
+
+func (s *Store) Secret(name string) ([]byte, error) {
+	var value []byte
+	err := s.db.QueryRow(`SELECT value FROM secrets WHERE name=?`, name).Scan(&value)
+	return value, err
+}
+
+func (s *Store) DeleteSecret(name string) error {
+	_, err := s.db.Exec(`DELETE FROM secrets WHERE name=?`, name)
+	return err
+}
+
 func (s *Store) SaveMessageMapping(mapping domain.MessageMapping) error {
-	_, err := s.db.Exec(`INSERT INTO message_map(route_id,source_chat_id,source_message_id,target_chat_id,target_message_id,created_at)
-VALUES(?,?,?,?,?,?) ON CONFLICT(route_id,source_chat_id,source_message_id,target_chat_id)
-DO UPDATE SET target_message_id=excluded.target_message_id,created_at=excluded.created_at`,
+	_, err := s.db.Exec(`INSERT INTO message_map(route_id,source_chat_id,source_message_id,target_chat_id,target_message_id,created_at,sender_account_id)
+VALUES(?,?,?,?,?,?,?) ON CONFLICT(route_id,source_chat_id,source_message_id,target_chat_id)
+DO UPDATE SET target_message_id=excluded.target_message_id,created_at=excluded.created_at,sender_account_id=excluded.sender_account_id`,
 		mapping.RouteID, mapping.SourceChatID, mapping.SourceMessageID,
-		mapping.TargetChatID, mapping.TargetMessageID, nowText())
+		mapping.TargetChatID, mapping.TargetMessageID, nowText(), mapping.SenderAccountID)
 	return err
 }
 
 func (s *Store) MessageMappings(sourceChatID int64, sourceMessageID int) ([]domain.MessageMapping, error) {
-	query := `SELECT route_id,source_chat_id,source_message_id,target_chat_id,target_message_id FROM message_map WHERE source_message_id=?`
+	query := `SELECT route_id,source_chat_id,source_message_id,target_chat_id,target_message_id,sender_account_id FROM message_map WHERE source_message_id=?`
 	args := []any{sourceMessageID}
 	if sourceChatID != 0 {
 		query += ` AND source_chat_id=?`
@@ -397,7 +510,7 @@ func (s *Store) MessageMappings(sourceChatID int64, sourceMessageID int) ([]doma
 	result := make([]domain.MessageMapping, 0)
 	for rows.Next() {
 		var mapping domain.MessageMapping
-		if err := rows.Scan(&mapping.RouteID, &mapping.SourceChatID, &mapping.SourceMessageID, &mapping.TargetChatID, &mapping.TargetMessageID); err != nil {
+		if err := rows.Scan(&mapping.RouteID, &mapping.SourceChatID, &mapping.SourceMessageID, &mapping.TargetChatID, &mapping.TargetMessageID, &mapping.SenderAccountID); err != nil {
 			return nil, err
 		}
 		result = append(result, mapping)
@@ -409,6 +522,144 @@ func (s *Store) DeleteMessageMapping(mapping domain.MessageMapping) error {
 	_, err := s.db.Exec(`DELETE FROM message_map WHERE route_id=? AND source_chat_id=? AND source_message_id=? AND target_chat_id=?`,
 		mapping.RouteID, mapping.SourceChatID, mapping.SourceMessageID, mapping.TargetChatID)
 	return err
+}
+
+func (s *Store) EnqueueOutbox(jobs []domain.OutboxJob) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := nowText()
+	for _, job := range jobs {
+		if job.ID == "" {
+			job.ID = id.New()
+		}
+		target, err := encode(job.Target)
+		if err != nil {
+			return err
+		}
+		buttons, err := encode(job.Buttons)
+		if err != nil {
+			return err
+		}
+		accounts, err := encode(job.SenderAccountIDs)
+		if err != nil {
+			return err
+		}
+		if job.DedupeKey == "" {
+			job.DedupeKey = job.ID
+		}
+		if job.RandomID == 0 {
+			job.RandomID = rand.Int64()
+		}
+		_, err = tx.Exec(`INSERT OR IGNORE INTO outbox_jobs(id,route_id,route_name,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?, 'pending',0,'','',?,'',?,?)`,
+			job.ID, job.RouteID, job.RouteName, target, job.Text, buttons, job.SourceChatID, job.SourceMessageID, accounts, job.OrderKey, job.DedupeKey, job.RandomID, now, now, now)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *Store) ClaimOutbox(lease time.Duration) (domain.OutboxJob, error) {
+	now := time.Now().UTC()
+	leaseUntil := now.Add(lease).Format(time.RFC3339Nano)
+	row := s.db.QueryRow(`UPDATE outbox_jobs SET status='processing',lease_until=?,updated_at=? WHERE id=(
+SELECT candidate.id FROM outbox_jobs candidate WHERE
+ ((candidate.status='pending' AND candidate.available_at<=?) OR (candidate.status='processing' AND candidate.lease_until<>'' AND candidate.lease_until<?))
+ AND NOT EXISTS (SELECT 1 FROM outbox_jobs earlier WHERE earlier.order_key=candidate.order_key AND earlier.rowid<candidate.rowid AND earlier.status IN ('pending','processing'))
+ ORDER BY candidate.available_at,candidate.created_at LIMIT 1
+) RETURNING id,route_id,route_name,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at`,
+		leaseUntil, now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
+	return scanOutbox(row)
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanOutbox(row rowScanner) (domain.OutboxJob, error) {
+	var job domain.OutboxJob
+	var target, buttons, accounts, available, lease, created, updated string
+	err := row.Scan(&job.ID, &job.RouteID, &job.RouteName, &target, &job.Text, &buttons, &job.SourceChatID, &job.SourceMessageID, &accounts, &job.OrderKey, &job.DedupeKey, &job.RandomID, &job.Status, &job.Attempts, &job.AssignedAccountID, &job.LastError, &available, &lease, &created, &updated)
+	if err != nil {
+		return job, err
+	}
+	if err := decode(target, &job.Target); err != nil {
+		return job, err
+	}
+	if err := decode(buttons, &job.Buttons); err != nil {
+		return job, err
+	}
+	if err := decode(accounts, &job.SenderAccountIDs); err != nil {
+		return job, err
+	}
+	job.AvailableAt, job.LeaseUntil = parseTime(available), parseTime(lease)
+	job.CreatedAt, job.UpdatedAt = parseTime(created), parseTime(updated)
+	return job, nil
+}
+
+func (s *Store) CompleteOutbox(jobID, accountID string) error {
+	_, err := s.db.Exec(`UPDATE outbox_jobs SET status='sent',assigned_account_id=?,lease_until='',last_error='',updated_at=? WHERE id=?`, accountID, nowText(), jobID)
+	return err
+}
+
+func (s *Store) DeferOutbox(jobID, message string, availableAt time.Time) error {
+	_, err := s.db.Exec(`UPDATE outbox_jobs SET status='pending',last_error=?,available_at=?,lease_until='',updated_at=? WHERE id=?`, message, availableAt.UTC().Format(time.RFC3339Nano), nowText(), jobID)
+	return err
+}
+
+func (s *Store) RetryOutbox(jobID, accountID, message string, availableAt time.Time, final bool) error {
+	status := "pending"
+	if final {
+		status = "failed"
+	}
+	_, err := s.db.Exec(`UPDATE outbox_jobs SET status=?,attempts=attempts+1,assigned_account_id=?,last_error=?,available_at=?,lease_until='',updated_at=? WHERE id=?`, status, accountID, message, availableAt.UTC().Format(time.RFC3339Nano), nowText(), jobID)
+	return err
+}
+
+func (s *Store) RequeueOutbox(jobID string) error {
+	result, err := s.db.Exec(`UPDATE outbox_jobs SET status='pending',attempts=0,assigned_account_id='',last_error='',available_at=?,lease_until='',updated_at=? WHERE id=? AND status='failed'`, nowText(), nowText(), jobID)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
+
+func (s *Store) ListOutbox(status string, limit int) ([]domain.OutboxJob, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	query := `SELECT id,route_id,route_name,target_json,text,buttons_json,source_chat_id,source_message_id,sender_accounts_json,order_key,dedupe_key,random_id,status,attempts,assigned_account_id,last_error,available_at,lease_until,created_at,updated_at FROM outbox_jobs`
+	args := []any{}
+	if status != "" {
+		query += ` WHERE status=?`
+		args = append(args, status)
+	}
+	query += ` ORDER BY created_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]domain.OutboxJob, 0)
+	for rows.Next() {
+		job, err := scanOutbox(rows)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, job)
+	}
+	return result, rows.Err()
 }
 
 func (s *Store) Dashboard() (domain.Dashboard, error) {
@@ -423,6 +674,9 @@ func (s *Store) Dashboard() (domain.Dashboard, error) {
 		return d, err
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM activities WHERE level='error' AND created_at>=date('now')`).Scan(&d.FailedToday); err != nil {
+		return d, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM outbox_jobs WHERE status IN ('pending','processing')`).Scan(&d.QueuedMessages); err != nil {
 		return d, err
 	}
 	var err error

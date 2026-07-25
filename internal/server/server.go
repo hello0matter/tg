@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"tgworkbench/internal/aiprocessor"
 	"tgworkbench/internal/domain"
 	"tgworkbench/internal/rules"
 	"tgworkbench/internal/startup"
@@ -69,8 +71,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/reviews", s.reviews)
 	mux.HandleFunc("POST /api/reviews/{id}/action", s.reviewAction)
 	mux.HandleFunc("GET /api/activity", s.activity)
+	mux.HandleFunc("GET /api/outbox", s.outbox)
+	mux.HandleFunc("POST /api/outbox/{id}/retry", s.retryOutbox)
 	mux.HandleFunc("GET /api/settings", s.settings)
 	mux.HandleFunc("PUT /api/settings", s.saveSettings)
+	mux.HandleFunc("POST /api/ai/preview", s.aiPreview)
 	mux.Handle("/", spaHandler(s.assets))
 	return s.localHostOnly(s.securityHeaders(s.requestLog(mux)))
 }
@@ -176,6 +181,19 @@ func validateRoute(route *domain.Route) error {
 	}
 	if route.ReviewMode == "" {
 		route.ReviewMode = "rules"
+	}
+	if len(route.SenderAccountIDs) == 0 {
+		route.SenderAccountIDs = []string{route.AccountID}
+	}
+	switch route.SenderFilterMode {
+	case "all", "admins", "allowlist", "admins_and_allowlist":
+	default:
+		route.SenderFilterMode = "all"
+	}
+	switch route.ButtonPolicy {
+	case "drop", "urls_only", "as_text":
+	default:
+		route.ButtonPolicy = "urls_only"
 	}
 	return nil
 }
@@ -317,8 +335,25 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 	value, err := s.store.ListActivities(limit)
 	respond(w, value, err)
 }
+func (s *Server) outbox(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	value, err := s.store.ListOutbox(r.URL.Query().Get("status"), limit)
+	respond(w, value, err)
+}
+func (s *Server) retryOutbox(w http.ResponseWriter, r *http.Request) {
+	err := s.store.RequeueOutbox(r.PathValue("id"))
+	if err == nil {
+		s.record("info", "queue", "失败任务已重新进入发送队列", "")
+	}
+	respondAccepted(w, err)
+}
 func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
 	value, err := s.store.Settings()
+	if err == nil {
+		_, secretErr := s.store.Secret("ai_api_key")
+		value.AI.HasAPIKey = secretErr == nil
+		value.AI.APIKey = ""
+	}
 	respond(w, value, err)
 }
 func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
@@ -334,12 +369,68 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if value.AI.TimeoutSeconds < 1 || value.AI.TimeoutSeconds > 300 || value.AI.MaxInputChars < 100 || value.AI.MaxInputChars > 100000 {
+		writeError(w, http.StatusBadRequest, "AI 超时或最大输入长度无效")
+		return
+	}
+	if value.AI.FailurePolicy != "review" && value.AI.FailurePolicy != "send" {
+		writeError(w, http.StatusBadRequest, "AI 失败策略无效")
+		return
+	}
+	if value.AI.Enabled {
+		parsed, err := url.Parse(value.AI.BaseURL)
+		if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || strings.TrimSpace(value.AI.Model) == "" {
+			writeError(w, http.StatusBadRequest, "AI URL 或模型无效")
+			return
+		}
+	}
 	if err := startup.Configure(value.StartWithWindows); err != nil {
 		writeInternal(w, err)
 		return
 	}
+	if strings.TrimSpace(value.AI.APIKey) != "" {
+		encrypted, err := s.vault.Encrypt(strings.TrimSpace(value.AI.APIKey))
+		if err != nil {
+			writeInternal(w, err)
+			return
+		}
+		if err := s.store.SaveSecret("ai_api_key", encrypted); err != nil {
+			writeInternal(w, err)
+			return
+		}
+	}
+	value.AI.APIKey = ""
+	_, secretErr := s.store.Secret("ai_api_key")
+	value.AI.HasAPIKey = secretErr == nil
 	err := s.store.SaveSettings(value)
 	respond(w, value, err)
+}
+
+func (s *Server) aiPreview(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Text        string `json:"text"`
+		RoutePrompt string `json:"routePrompt"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	settings, err := s.store.Settings()
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
+	encrypted, err := s.store.Secret("ai_api_key")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "尚未保存 AI API Key")
+		return
+	}
+	key, err := s.vault.Decrypt(encrypted)
+	if err != nil {
+		writeInternal(w, err)
+		return
+	}
+	result, err := aiprocessor.Process(r.Context(), settings.AI, key, input.RoutePrompt, input.Text)
+	respond(w, result, err)
 }
 
 func validateLocalAddress(address string) error {

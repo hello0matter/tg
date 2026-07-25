@@ -1,7 +1,9 @@
 package runtime
 
 import (
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/gotd/td/tg"
 )
@@ -20,6 +22,30 @@ func TestPeerID(t *testing.T) {
 		if got := peerID(tc.peer); got != tc.want {
 			t.Fatalf("peerID(%T) = %d, want %d", tc.peer, got, tc.want)
 		}
+	}
+}
+
+func TestFormatButtons(t *testing.T) {
+	t.Parallel()
+	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{{Buttons: []tg.KeyboardButtonClass{
+		&tg.KeyboardButtonURL{Text: "官网", URL: "https://example.com"},
+		&tg.KeyboardButtonCallback{Text: "查询", Data: []byte("lookup")},
+	}}}}
+	if got := formatButtons(markup, "urls_only"); got != "官网 https://example.com" {
+		t.Fatalf("urls_only = %q", got)
+	}
+	if got := formatButtons(markup, "as_text"); got != "官网 https://example.com\n[按钮] 查询" {
+		t.Fatalf("as_text = %q", got)
+	}
+	if got := formatButtons(markup, "drop"); got != "" {
+		t.Fatalf("drop = %q", got)
+	}
+}
+
+func TestFloodWait(t *testing.T) {
+	t.Parallel()
+	if got := floodWait(errors.New("rpc: FLOOD_WAIT_12")); got != 13*time.Second {
+		t.Fatalf("floodWait = %v", got)
 	}
 }
 

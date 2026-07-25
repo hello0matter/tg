@@ -31,19 +31,26 @@ type PeerRef struct {
 }
 
 type Route struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	AccountID     string    `json:"accountId"`
-	Sources       []PeerRef `json:"sources"`
-	Targets       []PeerRef `json:"targets"`
-	Mode          string    `json:"mode"`
-	ReviewMode    string    `json:"reviewMode"`
-	Enabled       bool      `json:"enabled"`
-	SyncEdits     bool      `json:"syncEdits"`
-	SyncDeletes   bool      `json:"syncDeletes"`
-	SyncReactions bool      `json:"syncReactions"`
-	CreatedAt     time.Time `json:"createdAt"`
-	UpdatedAt     time.Time `json:"updatedAt"`
+	ID               string    `json:"id"`
+	Name             string    `json:"name"`
+	AccountID        string    `json:"accountId"`
+	SenderAccountIDs []string  `json:"senderAccountIds"`
+	Sources          []PeerRef `json:"sources"`
+	Targets          []PeerRef `json:"targets"`
+	Mode             string    `json:"mode"`
+	ReviewMode       string    `json:"reviewMode"`
+	SenderFilterMode string    `json:"senderFilterMode"`
+	AllowedSenderIDs []int64   `json:"allowedSenderIds"`
+	IncludeBots      bool      `json:"includeBots"`
+	ButtonPolicy     string    `json:"buttonPolicy"`
+	AIEnabled        bool      `json:"aiEnabled"`
+	AIPrompt         string    `json:"aiPrompt"`
+	Enabled          bool      `json:"enabled"`
+	SyncEdits        bool      `json:"syncEdits"`
+	SyncDeletes      bool      `json:"syncDeletes"`
+	SyncReactions    bool      `json:"syncReactions"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
 }
 
 type Rule struct {
@@ -113,23 +120,66 @@ type MessageMapping struct {
 	SourceMessageID int
 	TargetChatID    int64
 	TargetMessageID int
+	SenderAccountID string
 }
 
 type Dashboard struct {
-	RunningRoutes int        `json:"runningRoutes"`
-	TotalRoutes   int        `json:"totalRoutes"`
-	PendingReview int        `json:"pendingReview"`
-	SentToday     int        `json:"sentToday"`
-	FailedToday   int        `json:"failedToday"`
-	Accounts      []Account  `json:"accounts"`
-	Recent        []Activity `json:"recentActivity"`
+	RunningRoutes  int        `json:"runningRoutes"`
+	TotalRoutes    int        `json:"totalRoutes"`
+	PendingReview  int        `json:"pendingReview"`
+	SentToday      int        `json:"sentToday"`
+	FailedToday    int        `json:"failedToday"`
+	QueuedMessages int        `json:"queuedMessages"`
+	Accounts       []Account  `json:"accounts"`
+	Recent         []Activity `json:"recentActivity"`
 }
 
 type Settings struct {
-	ListenAddress    string `json:"listenAddress"`
-	RetentionDays    int    `json:"retentionDays"`
-	MediaCacheMB     int    `json:"mediaCacheMb"`
-	OpenBrowser      bool   `json:"openBrowser"`
-	StartWithWindows bool   `json:"startWithWindows"`
-	ProxyURL         string `json:"proxyUrl"`
+	ListenAddress    string     `json:"listenAddress"`
+	RetentionDays    int        `json:"retentionDays"`
+	MediaCacheMB     int        `json:"mediaCacheMb"`
+	OpenBrowser      bool       `json:"openBrowser"`
+	StartWithWindows bool       `json:"startWithWindows"`
+	ProxyURL         string     `json:"proxyUrl"`
+	AI               AISettings `json:"ai"`
+}
+
+type AISettings struct {
+	Enabled        bool   `json:"enabled"`
+	BaseURL        string `json:"baseUrl"`
+	Model          string `json:"model"`
+	APIKey         string `json:"apiKey"`
+	HasAPIKey      bool   `json:"hasApiKey"`
+	Prompt         string `json:"prompt"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
+	FailurePolicy  string `json:"failurePolicy"`
+	MaxInputChars  int    `json:"maxInputChars"`
+}
+
+type ButtonLink struct {
+	Text string `json:"text"`
+	URL  string `json:"url"`
+}
+
+type OutboxJob struct {
+	ID                string       `json:"id"`
+	RouteID           string       `json:"routeId"`
+	RouteName         string       `json:"routeName"`
+	Target            PeerRef      `json:"target"`
+	Text              string       `json:"text"`
+	Buttons           []ButtonLink `json:"buttons"`
+	SourceChatID      int64        `json:"sourceChatId"`
+	SourceMessageID   int          `json:"sourceMessageId"`
+	SenderAccountIDs  []string     `json:"senderAccountIds"`
+	OrderKey          string       `json:"orderKey"`
+	DedupeKey         string       `json:"dedupeKey"`
+	RandomID          int64        `json:"randomId"`
+	Status            string       `json:"status"`
+	Attempts          int          `json:"attempts"`
+	AssignedAccountID string       `json:"assignedAccountId"`
+	LastError         string       `json:"lastError"`
+	AvailableAt       time.Time    `json:"availableAt"`
+	LeaseUntil        time.Time    `json:"leaseUntil"`
+	CreatedAt         time.Time    `json:"createdAt"`
+	UpdatedAt         time.Time    `json:"updatedAt"`
 }

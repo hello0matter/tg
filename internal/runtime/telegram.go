@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +25,7 @@ import (
 	"github.com/gotd/td/tg"
 	"golang.org/x/net/proxy"
 
+	"tgworkbench/internal/aiprocessor"
 	"tgworkbench/internal/domain"
 	"tgworkbench/internal/rules"
 	"tgworkbench/internal/store"
@@ -32,16 +35,26 @@ import (
 const channelIDOffset int64 = 1_000_000_000_000
 
 type Manager struct {
-	store   *store.Store
-	vault   *vault.Vault
-	dataDir string
-	log     *slog.Logger
-	engine  rules.Engine
+	store       *store.Store
+	vault       *vault.Vault
+	dataDir     string
+	log         *slog.Logger
+	engine      rules.Engine
+	queueCancel context.CancelFunc
 
-	mu       sync.RWMutex
-	sessions map[string]*accountSession
-	albumMu  sync.Mutex
-	albums   map[string]*pendingAlbum
+	mu         sync.RWMutex
+	sessions   map[string]*accountSession
+	albumMu    sync.Mutex
+	albums     map[string]*pendingAlbum
+	adminMu    sync.Mutex
+	admins     map[string]adminCache
+	cooldown   map[string]time.Time
+	roundRobin int
+}
+
+type adminCache struct {
+	userIDs   map[int64]bool
+	expiresAt time.Time
 }
 
 type accountSession struct {
@@ -77,14 +90,22 @@ type webAuthenticator struct {
 }
 
 func NewManager(dataDir string, store *store.Store, vault *vault.Vault, log *slog.Logger) *Manager {
-	return &Manager{
-		store:    store,
-		vault:    vault,
-		dataDir:  dataDir,
-		log:      log,
-		sessions: make(map[string]*accountSession),
-		albums:   make(map[string]*pendingAlbum),
+	queueCtx, queueCancel := context.WithCancel(context.Background())
+	manager := &Manager{
+		store:       store,
+		vault:       vault,
+		dataDir:     dataDir,
+		log:         log,
+		sessions:    make(map[string]*accountSession),
+		albums:      make(map[string]*pendingAlbum),
+		admins:      make(map[string]adminCache),
+		cooldown:    make(map[string]time.Time),
+		queueCancel: queueCancel,
 	}
+	for range 4 {
+		go manager.outboxWorker(queueCtx)
+	}
+	return manager
 }
 
 func (m *Manager) Connect(accountID string) error {
@@ -299,11 +320,157 @@ func (m *Manager) SendManual(routeID, text string) error {
 	if err != nil {
 		return err
 	}
-	s, err := m.session(route.AccountID)
-	if err != nil {
-		return errors.New("线路账号未连接")
+	return m.enqueueText(route, text, nil, nil)
+}
+
+func (m *Manager) enqueueText(route domain.Route, text string, buttons []domain.ButtonLink, source *sourceMessage) error {
+	if strings.TrimSpace(text) == "" {
+		return errors.New("发送内容为空")
 	}
-	return m.sendText(context.Background(), s, route, text, nil)
+	accountIDs := route.SenderAccountIDs
+	if len(accountIDs) == 0 {
+		accountIDs = []string{route.AccountID}
+	}
+	jobs := make([]domain.OutboxJob, 0, len(route.Targets))
+	for _, target := range route.Targets {
+		job := domain.OutboxJob{
+			RouteID: route.ID, RouteName: route.Name, Target: target, Text: text, Buttons: buttons,
+			SenderAccountIDs: accountIDs,
+			OrderKey:         fmt.Sprintf("%d:%d", target.ChatID, target.TopicID),
+		}
+		if source != nil {
+			job.SourceChatID, job.SourceMessageID = source.chatID, source.messageID
+			job.DedupeKey = fmt.Sprintf("%s:%d:%d:%d:%d:text", route.ID, source.chatID, source.messageID, target.ChatID, target.TopicID)
+		}
+		jobs = append(jobs, job)
+	}
+	if err := m.store.EnqueueOutbox(jobs); err != nil {
+		return err
+	}
+	m.activity("info", "queue", fmt.Sprintf("消息已进入发送队列，共 %d 个目标", len(jobs)), route.ID)
+	return nil
+}
+
+func (m *Manager) outboxWorker(ctx context.Context) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		job, err := m.store.ClaimOutbox(2 * time.Minute)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			m.log.Error("claim outbox", "error", err)
+			continue
+		}
+		m.processOutbox(ctx, job)
+	}
+}
+
+func (m *Manager) processOutbox(ctx context.Context, job domain.OutboxJob) {
+	session, accountID := m.pickSender(job)
+	if session == nil {
+		_ = m.store.DeferOutbox(job.ID, "账号池暂无可写入该目标的在线账号", time.Now().Add(5*time.Second))
+		return
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
+	err := m.sendQueuedText(sendCtx, session, job)
+	if err == nil {
+		_ = m.store.CompleteOutbox(job.ID, accountID)
+		m.activity("info", "sent", "已通过账号池同步到 "+displayPeer(job.Target), job.RouteID)
+		return
+	}
+	delay := time.Duration(1<<min(job.Attempts, 8)) * time.Second
+	if flood := floodWait(err); flood > 0 {
+		delay = flood
+		m.mu.Lock()
+		m.cooldown[accountID] = time.Now().Add(flood)
+		m.mu.Unlock()
+	}
+	final := job.Attempts >= 11
+	_ = m.store.RetryOutbox(job.ID, accountID, err.Error(), time.Now().Add(delay), final)
+	level := "warning"
+	if final {
+		level = "error"
+	}
+	m.activity(level, "queue", "队列发送失败，将按策略处理: "+err.Error(), job.RouteID)
+}
+
+func (m *Manager) pickSender(job domain.OutboxJob) (*accountSession, string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(job.SenderAccountIDs) == 0 {
+		return nil, ""
+	}
+	start := m.roundRobin % len(job.SenderAccountIDs)
+	for offset := range len(job.SenderAccountIDs) {
+		accountID := job.SenderAccountIDs[(start+offset)%len(job.SenderAccountIDs)]
+		if until := m.cooldown[accountID]; until.After(time.Now()) {
+			continue
+		}
+		session := m.sessions[accountID]
+		if session == nil {
+			continue
+		}
+		session.mu.RLock()
+		_, hasPeer := session.peers[job.Target.ChatID]
+		ready := session.client != nil
+		session.mu.RUnlock()
+		if ready && hasPeer {
+			m.roundRobin = start + offset + 1
+			return session, accountID
+		}
+	}
+	return nil, ""
+}
+
+func (m *Manager) sendQueuedText(ctx context.Context, session *accountSession, job domain.OutboxJob) error {
+	session.mu.RLock()
+	client := session.client
+	session.mu.RUnlock()
+	if client == nil {
+		return errors.New("Telegram 客户端尚未就绪")
+	}
+	peer, err := session.peer(job.Target.ChatID)
+	if err != nil {
+		return err
+	}
+	request := &tg.MessagesSendMessageRequest{Peer: peer, Message: job.Text, RandomID: job.RandomID}
+	if job.Target.TopicID > 0 {
+		request.ReplyTo = &tg.InputReplyToMessage{ReplyToMsgID: job.Target.TopicID}
+	}
+	updates, err := client.API().MessagesSendMessage(ctx, request)
+	if err != nil {
+		return err
+	}
+	if job.SourceMessageID != 0 {
+		m.recordMapping(job.RouteID, &sourceMessage{chatID: job.SourceChatID, messageID: job.SourceMessageID}, job.Target.ChatID, sentMessageID(updates), session.accountID)
+	}
+	return nil
+}
+
+func floodWait(err error) time.Duration {
+	message := strings.ToUpper(err.Error())
+	marker := "FLOOD_WAIT_"
+	index := strings.Index(message, marker)
+	if index < 0 {
+		return 0
+	}
+	digits := message[index+len(marker):]
+	if end := strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }); end >= 0 {
+		digits = digits[:end]
+	}
+	seconds, _ := strconv.Atoi(digits)
+	if seconds <= 0 {
+		return 0
+	}
+	return time.Duration(seconds+1) * time.Second
 }
 
 func (m *Manager) ListPeers(accountID string) ([]domain.PeerRef, error) {
@@ -327,6 +494,7 @@ func (m *Manager) ListPeers(accountID string) ([]domain.PeerRef, error) {
 }
 
 func (m *Manager) Close() {
+	m.queueCancel()
 	m.mu.RLock()
 	sessions := make([]*accountSession, 0, len(m.sessions))
 	for _, s := range m.sessions {
@@ -445,6 +613,15 @@ func (m *Manager) handleNewMessage(ctx context.Context, s *accountSession, entit
 		if !route.Enabled || route.AccountID != s.accountID || !matchesSource(route.Sources, chatID, topicID) {
 			continue
 		}
+		allowed, err := m.senderAllowed(ctx, s, route, msg, chatID, entities)
+		if err != nil {
+			m.activity("warning", "filter", "无法刷新管理员列表，已跳过消息: "+err.Error(), route.ID)
+			continue
+		}
+		if !allowed {
+			m.activity("info", "filter", "已忽略非指定发送者的消息", route.ID)
+			continue
+		}
 		if msg.Noforwards {
 			m.activity("warning", "protected", "已跳过 Telegram 受保护内容", route.ID)
 			continue
@@ -458,6 +635,98 @@ func (m *Manager) handleNewMessage(ctx context.Context, s *accountSession, entit
 		}
 	}
 	return nil
+}
+
+func (m *Manager) senderAllowed(ctx context.Context, session *accountSession, route domain.Route, msg *tg.Message, chatID int64, entities tg.Entities) (bool, error) {
+	mode := route.SenderFilterMode
+	if mode == "" || mode == "all" {
+		return true, nil
+	}
+	senderID := peerID(msg.FromID)
+	for _, allowedID := range route.AllowedSenderIDs {
+		if allowedID == senderID {
+			return true, nil
+		}
+	}
+	if route.IncludeBots && senderID > 0 {
+		if user := entities.Users[senderID]; user != nil && user.Bot {
+			return true, nil
+		}
+	}
+	if mode == "allowlist" {
+		return false, nil
+	}
+	if msg.Post || senderID == chatID {
+		return true, nil
+	}
+	admins, err := m.adminIDs(ctx, session, chatID)
+	if err != nil {
+		return false, err
+	}
+	return admins[senderID], nil
+}
+
+func (m *Manager) adminIDs(ctx context.Context, session *accountSession, chatID int64) (map[int64]bool, error) {
+	key := session.accountID + ":" + strconv.FormatInt(chatID, 10)
+	m.adminMu.Lock()
+	if cached, ok := m.admins[key]; ok && cached.expiresAt.After(time.Now()) {
+		m.adminMu.Unlock()
+		return cached.userIDs, nil
+	}
+	m.adminMu.Unlock()
+
+	session.mu.RLock()
+	client := session.client
+	peer := session.peers[chatID]
+	session.mu.RUnlock()
+	if client == nil || peer == nil {
+		return nil, errors.New("来源会话尚未加载")
+	}
+	result := make(map[int64]bool)
+	switch input := peer.(type) {
+	case *tg.InputPeerChannel:
+		participants, err := client.API().ChannelsGetParticipants(ctx, &tg.ChannelsGetParticipantsRequest{
+			Channel: &tg.InputChannel{ChannelID: input.ChannelID, AccessHash: input.AccessHash},
+			Filter:  &tg.ChannelParticipantsAdmins{}, Limit: 200,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if listed, ok := participants.(*tg.ChannelsChannelParticipants); ok {
+			for _, participant := range listed.Participants {
+				if identified, ok := participant.(interface{ GetUserID() int64 }); ok {
+					result[identified.GetUserID()] = true
+				}
+			}
+		}
+	case *tg.InputPeerChat:
+		full, err := client.API().MessagesGetFullChat(ctx, input.ChatID)
+		if err != nil {
+			return nil, err
+		}
+		chat, ok := full.FullChat.(*tg.ChatFull)
+		if !ok {
+			break
+		}
+		participants, ok := chat.Participants.(*tg.ChatParticipants)
+		if !ok {
+			break
+		}
+		for _, participant := range participants.Participants {
+			switch value := participant.(type) {
+			case *tg.ChatParticipantAdmin:
+				result[value.UserID] = true
+			case *tg.ChatParticipantCreator:
+				result[value.UserID] = true
+			}
+		}
+	default:
+		return result, nil
+	}
+	m.adminMu.Lock()
+	m.admins[key] = adminCache{userIDs: result, expiresAt: time.Now().Add(10 * time.Minute)}
+	m.adminMu.Unlock()
+	return result, nil
 }
 
 func (m *Manager) queueAlbum(s *accountSession, route domain.Route, msg *tg.Message, entities tg.Entities) {
@@ -509,6 +778,17 @@ func (m *Manager) processAlbum(ctx context.Context, pending *pendingAlbum) error
 			TopicID: messageTopic(msg), SenderName: senderName(msg.FromID, pending.entities),
 			MessageType: classifyMessage(msg), Caption: msg.Message,
 		}, configured)
+		if pending.route.AIEnabled && result.Decision == "send" && strings.TrimSpace(result.Caption) != "" {
+			aiResult, _, err := m.applyAI(ctx, pending.route, result.Caption)
+			if err != nil {
+				return err
+			}
+			result.Caption = aiResult.Text
+			result.Decision = aiResult.Decision
+		}
+		if suffix := formatButtons(msg.ReplyMarkup, pending.route.ButtonPolicy); suffix != "" {
+			result.Caption = strings.TrimSpace(result.Caption + "\n\n" + suffix)
+		}
 		captions[i] = result.Caption
 		if result.Decision == "review" {
 			decision = "review"
@@ -534,7 +814,7 @@ func (m *Manager) processAlbum(ctx context.Context, pending *pendingAlbum) error
 		})
 		return err
 	}
-	if pending.route.Mode == "forward" && stringSlicesEqual(original, captions) {
+	if pending.route.Mode == "forward" && stringSlicesEqual(original, captions) && !albumHasButtons(pending.messages) {
 		return m.forwardAlbum(ctx, pending)
 	}
 	return m.copyAlbum(ctx, pending, captions)
@@ -622,11 +902,13 @@ func (m *Manager) forwardAlbum(ctx context.Context, pending *pendingAlbum) error
 
 func (m *Manager) processRoute(ctx context.Context, s *accountSession, route domain.Route, msg *tg.Message, chatID int64, topicID int, entities tg.Entities) error {
 	messageType := classifyMessage(msg)
+	senderID := peerID(msg.FromID)
 	envelope := domain.MessageEnvelope{
 		RouteID:      route.ID,
 		SourceChatID: chatID,
 		SourceMsgID:  msg.ID,
 		TopicID:      topicID,
+		SenderID:     senderID,
 		SenderName:   senderName(msg.FromID, entities),
 		MessageType:  messageType,
 	}
@@ -645,8 +927,36 @@ func (m *Manager) processRoute(ctx context.Context, s *accountSession, route dom
 		return nil
 	}
 	reason := "规则要求人工审核"
+	if route.AIEnabled && result.Decision == "send" && strings.TrimSpace(firstNonEmpty(result.Text, result.Caption)) != "" {
+		aiText := firstNonEmpty(result.Text, result.Caption)
+		aiResult, aiReason, err := m.applyAI(ctx, route, aiText)
+		if err != nil {
+			return err
+		}
+		if messageType == "text" {
+			result.Text = aiResult.Text
+		} else {
+			result.Caption = aiResult.Text
+		}
+		result.Decision = aiResult.Decision
+		if aiReason != "" {
+			reason = aiReason
+		}
+	}
+	buttonSuffix := formatButtons(msg.ReplyMarkup, route.ButtonPolicy)
+	if buttonSuffix != "" {
+		if messageType == "text" {
+			result.Text = strings.TrimSpace(result.Text + "\n\n" + buttonSuffix)
+		} else {
+			result.Caption = strings.TrimSpace(result.Caption + "\n\n" + buttonSuffix)
+		}
+	}
 	if route.ReviewMode == "all" {
 		result.Decision, reason = "review", "线路设置为全部审核"
+	}
+	if result.Decision == "drop" {
+		m.activity("info", "ai", "消息被 AI 判定为丢弃", route.ID)
+		return nil
 	}
 	if result.Decision == "review" {
 		sourceTitle := sourceTitle(route.Sources, chatID, topicID)
@@ -667,7 +977,7 @@ func (m *Manager) processRoute(ctx context.Context, s *accountSession, route dom
 		return err
 	}
 	if messageType != "text" {
-		if route.Mode == "forward" && result.Caption == msg.Message {
+		if route.Mode == "forward" && result.Caption == msg.Message && msg.ReplyMarkup == nil {
 			return m.forward(ctx, s, route, chatID, msg.ID)
 		}
 		source := &sourceMessage{chatID: chatID, messageID: msg.ID}
@@ -684,7 +994,79 @@ func (m *Manager) processRoute(ctx context.Context, s *accountSession, route dom
 		})
 		return err
 	}
-	return m.sendText(ctx, s, route, result.Text, &sourceMessage{chatID: chatID, messageID: msg.ID})
+	return m.enqueueText(route, result.Text, nil, &sourceMessage{chatID: chatID, messageID: msg.ID})
+}
+
+func (m *Manager) applyAI(ctx context.Context, route domain.Route, text string) (aiprocessor.Result, string, error) {
+	settings, err := m.store.Settings()
+	if err != nil {
+		return aiprocessor.Result{}, "", err
+	}
+	if !settings.AI.Enabled {
+		return aiprocessor.Result{Decision: "send", Text: text}, "", nil
+	}
+	encrypted, err := m.store.Secret("ai_api_key")
+	if err == nil {
+		var key string
+		key, err = m.vault.Decrypt(encrypted)
+		if err == nil {
+			var result aiprocessor.Result
+			result, err = aiprocessor.Process(ctx, settings.AI, key, route.AIPrompt, text)
+			if err == nil {
+				reason := strings.TrimSpace(result.Reason)
+				if reason == "" && result.Decision == "review" {
+					reason = "AI 要求人工审核"
+				}
+				return result, reason, nil
+			}
+		}
+	}
+	m.activity("warning", "ai", "AI 处理失败: "+err.Error(), route.ID)
+	if settings.AI.FailurePolicy == "send" {
+		return aiprocessor.Result{Decision: "send", Text: text}, "AI 失败后按配置原文发送", nil
+	}
+	return aiprocessor.Result{Decision: "review", Text: text}, "AI 处理失败，已转人工审核", nil
+}
+
+func formatButtons(markup tg.ReplyMarkupClass, policy string) string {
+	if markup == nil || policy == "drop" {
+		return ""
+	}
+	rows, ok := markup.(interface{ GetRows() []tg.KeyboardButtonRow })
+	if !ok {
+		return ""
+	}
+	lines := make([]string, 0)
+	for _, row := range rows.GetRows() {
+		for _, raw := range row.Buttons {
+			text := ""
+			if named, ok := raw.(interface{ GetText() string }); ok {
+				text = strings.TrimSpace(named.GetText())
+			}
+			switch button := raw.(type) {
+			case *tg.KeyboardButtonURL:
+				lines = append(lines, strings.TrimSpace(text+" "+button.URL))
+			case *tg.KeyboardButtonWebView:
+				lines = append(lines, strings.TrimSpace(text+" "+button.URL))
+			case *tg.KeyboardButtonSimpleWebView:
+				lines = append(lines, strings.TrimSpace(text+" "+button.URL))
+			default:
+				if policy == "as_text" && text != "" {
+					lines = append(lines, "[按钮] "+text)
+				}
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func albumHasButtons(messages []*tg.Message) bool {
+	for _, msg := range messages {
+		if msg.ReplyMarkup != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) handleEditedMessage(ctx context.Context, s *accountSession, entities tg.Entities, raw tg.MessageClass) error {
@@ -719,11 +1101,39 @@ func (m *Manager) handleEditedMessage(ctx context.Context, s *accountSession, en
 			return err
 		}
 		result := m.engine.Apply(envelope, configured)
+		if route.AIEnabled && result.Decision == "send" {
+			aiText := firstNonEmpty(result.Text, result.Caption)
+			if strings.TrimSpace(aiText) != "" {
+				aiResult, _, err := m.applyAI(ctx, route, aiText)
+				if err != nil {
+					return err
+				}
+				if messageType == "text" {
+					result.Text = aiResult.Text
+				} else {
+					result.Caption = aiResult.Text
+				}
+				result.Decision = aiResult.Decision
+			}
+		}
+		if suffix := formatButtons(msg.ReplyMarkup, route.ButtonPolicy); suffix != "" {
+			if messageType == "text" {
+				result.Text = strings.TrimSpace(result.Text + "\n\n" + suffix)
+			} else {
+				result.Caption = strings.TrimSpace(result.Caption + "\n\n" + suffix)
+			}
+		}
 		if result.Decision != "send" {
 			m.activity("warning", "edit", "编辑后的消息命中审核或丢弃规则，目标未自动修改", route.ID)
 			continue
 		}
-		if err := m.editMappedMessage(ctx, s, mapping, msg.Media, firstNonEmpty(result.Text, result.Caption), messageType); err != nil {
+		senderSession := s
+		if mapping.SenderAccountID != "" && mapping.SenderAccountID != s.accountID {
+			if pooled, sessionErr := m.session(mapping.SenderAccountID); sessionErr == nil {
+				senderSession = pooled
+			}
+		}
+		if err := m.editMappedMessage(ctx, senderSession, mapping, msg.Media, firstNonEmpty(result.Text, result.Caption), messageType); err != nil {
 			m.activity("error", "edit", "同步编辑失败: "+err.Error(), route.ID)
 			continue
 		}
@@ -767,13 +1177,19 @@ func (m *Manager) handleDeletedMessages(ctx context.Context, s *accountSession, 
 			if err != nil || !route.SyncDeletes || route.AccountID != s.accountID {
 				continue
 			}
-			s.mu.RLock()
-			client := s.client
-			s.mu.RUnlock()
+			senderSession := s
+			if mapping.SenderAccountID != "" && mapping.SenderAccountID != s.accountID {
+				if pooled, sessionErr := m.session(mapping.SenderAccountID); sessionErr == nil {
+					senderSession = pooled
+				}
+			}
+			senderSession.mu.RLock()
+			client := senderSession.client
+			senderSession.mu.RUnlock()
 			if client == nil {
 				return errors.New("Telegram 客户端尚未就绪")
 			}
-			peer, err := s.peer(mapping.TargetChatID)
+			peer, err := senderSession.peer(mapping.TargetChatID)
 			if err != nil {
 				m.activity("error", "delete", "同步删除失败: "+err.Error(), route.ID)
 				continue
@@ -789,13 +1205,17 @@ func (m *Manager) handleDeletedMessages(ctx context.Context, s *accountSession, 
 	return nil
 }
 
-func (m *Manager) recordMapping(routeID string, source *sourceMessage, targetChatID int64, targetMessageID int) {
+func (m *Manager) recordMapping(routeID string, source *sourceMessage, targetChatID int64, targetMessageID int, senderAccountIDs ...string) {
 	if source == nil || targetMessageID == 0 {
 		return
 	}
+	senderAccountID := ""
+	if len(senderAccountIDs) > 0 {
+		senderAccountID = senderAccountIDs[0]
+	}
 	err := m.store.SaveMessageMapping(domain.MessageMapping{
 		RouteID: routeID, SourceChatID: source.chatID, SourceMessageID: source.messageID,
-		TargetChatID: targetChatID, TargetMessageID: targetMessageID,
+		TargetChatID: targetChatID, TargetMessageID: targetMessageID, SenderAccountID: senderAccountID,
 	})
 	if err != nil {
 		m.log.Error("save message mapping", "error", err)
