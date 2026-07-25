@@ -1,0 +1,20 @@
+.route-foot .text-button {
+  margin-left: 0;
+}
+
+.route-foot .text-button:last-child {
+  margin-left: auto;
+}
+
+.fieldset-note {
+  display: block;
+  color: #a1a1aa;
+  font-size: 10px;
+  margin-top: 7px;
+}
+
+@media (max-width: 580px) {
+  .route-foot .text-button:last-child {
+    margin-left: 0;
+  }
+}

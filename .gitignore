@@ -1,0 +1,8 @@
+/dist/
+/run-data/
+/webui/node_modules/
+*.db
+*.db-shm
+*.db-wal
+*.session
+vault.key
