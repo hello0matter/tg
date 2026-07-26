@@ -22,6 +22,11 @@ import (
 	"tgworkbench/internal/vault"
 )
 
+const (
+	aiAPIKeySecret        = "ai_api_key"
+	telegramAPIHashSecret = "telegram_api_hash"
+)
+
 type Runtime interface {
 	Descriptors() []connector.Descriptor
 	CreateAccount(input domain.AccountInput) (domain.Account, error)
@@ -366,9 +371,12 @@ func (s *Server) retryOutbox(w http.ResponseWriter, r *http.Request) {
 func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
 	value, err := s.store.Settings()
 	if err == nil {
-		_, secretErr := s.store.Secret("ai_api_key")
+		_, secretErr := s.store.Secret(aiAPIKeySecret)
 		value.AI.HasAPIKey = secretErr == nil
 		value.AI.APIKey = ""
+		_, secretErr = s.store.Secret(telegramAPIHashSecret)
+		value.Telegram.HasAPIHash = secretErr == nil
+		value.Telegram.APIHash = ""
 	}
 	respond(w, value, err)
 }
@@ -400,26 +408,52 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	telegramHash := strings.TrimSpace(value.Telegram.APIHash)
+	_, telegramSecretErr := s.store.Secret(telegramAPIHashSecret)
+	telegramHashConfigured := telegramHash != "" || telegramSecretErr == nil
+	if (value.Telegram.APIID > 0) != telegramHashConfigured {
+		writeError(w, http.StatusBadRequest, "Telegram API ID 和 API Hash 必须同时配置")
+		return
+	}
+	if value.Telegram.APIID < 0 || (telegramHash != "" && len(telegramHash) < 8) {
+		writeError(w, http.StatusBadRequest, "Telegram API ID 或 API Hash 无效")
+		return
+	}
 	if err := startup.Configure(value.StartWithWindows); err != nil {
 		writeInternal(w, err)
 		return
 	}
+	value, err := s.persistSettings(value)
+	respond(w, value, err)
+}
+
+func (s *Server) persistSettings(value domain.Settings) (domain.Settings, error) {
 	if strings.TrimSpace(value.AI.APIKey) != "" {
 		encrypted, err := s.vault.Encrypt(strings.TrimSpace(value.AI.APIKey))
 		if err != nil {
-			writeInternal(w, err)
-			return
+			return value, err
 		}
-		if err := s.store.SaveSecret("ai_api_key", encrypted); err != nil {
-			writeInternal(w, err)
-			return
+		if err := s.store.SaveSecret(aiAPIKeySecret, encrypted); err != nil {
+			return value, err
+		}
+	}
+	telegramHash := strings.TrimSpace(value.Telegram.APIHash)
+	if telegramHash != "" {
+		encrypted, err := s.vault.Encrypt(telegramHash)
+		if err != nil {
+			return value, err
+		}
+		if err := s.store.SaveSecret(telegramAPIHashSecret, encrypted); err != nil {
+			return value, err
 		}
 	}
 	value.AI.APIKey = ""
-	_, secretErr := s.store.Secret("ai_api_key")
+	_, secretErr := s.store.Secret(aiAPIKeySecret)
 	value.AI.HasAPIKey = secretErr == nil
-	err := s.store.SaveSettings(value)
-	respond(w, value, err)
+	value.Telegram.APIHash = ""
+	_, secretErr = s.store.Secret(telegramAPIHashSecret)
+	value.Telegram.HasAPIHash = secretErr == nil
+	return value, s.store.SaveSettings(value)
 }
 
 func (s *Server) aiPreview(w http.ResponseWriter, r *http.Request) {
@@ -435,7 +469,7 @@ func (s *Server) aiPreview(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, err)
 		return
 	}
-	encrypted, err := s.store.Secret("ai_api_key")
+	encrypted, err := s.store.Secret(aiAPIKeySecret)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "尚未保存 AI API Key")
 		return

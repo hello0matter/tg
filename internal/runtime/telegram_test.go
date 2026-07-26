@@ -2,11 +2,110 @@ package runtime
 
 import (
 	"errors"
+	"io"
+	"log/slog"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/gotd/td/tg"
+
+	"tgworkbench/internal/connector"
+	"tgworkbench/internal/domain"
+	"tgworkbench/internal/store"
+	"tgworkbench/internal/vault"
 )
+
+func newCredentialTestManager(t *testing.T) (*Manager, *store.Store, *vault.Vault) {
+	t.Helper()
+	dataDir := t.TempDir()
+	db, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	secure, err := vault.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManager(dataDir, db, secure, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(manager.queueCancel)
+	return manager, db, secure
+}
+
+func saveGlobalTelegramCredentials(t *testing.T, db *store.Store, secure *vault.Vault, apiID int, apiHash string) {
+	t.Helper()
+	settings, err := db.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Telegram.APIID = apiID
+	if err := db.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := secure.Encrypt(apiHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveSecret(telegramAPIHashSecret, encrypted); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCreateAccountUsesGlobalTelegramCredentials(t *testing.T) {
+	manager, db, secure := newCredentialTestManager(t)
+	if _, err := manager.CreateAccount(domain.AccountInput{Name: "global", ConnectorConfig: map[string]string{"phone": "+85212345678"}}); err == nil {
+		t.Fatal("account without global or override credentials should fail")
+	}
+	saveGlobalTelegramCredentials(t, db, secure, 123456, "global-hash")
+	account, err := manager.CreateAccount(domain.AccountInput{Name: "global", ConnectorConfig: map[string]string{"phone": "+85212345678"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, encryptedHash, err := db.AccountCredentials(account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.APIID != 0 || stored.HasAPIHash || len(encryptedHash) != 0 {
+		t.Fatalf("global account stored account override: %#v, %d bytes", stored, len(encryptedHash))
+	}
+	apiID, apiHash, err := manager.resolveTelegramCredentials(stored, encryptedHash)
+	if err != nil || apiID != 123456 || apiHash != "global-hash" {
+		t.Fatalf("resolved credentials = %d, %q, %v", apiID, apiHash, err)
+	}
+}
+
+func TestAccountTelegramCredentialsAreAtomicAndOverrideGlobal(t *testing.T) {
+	manager, db, secure := newCredentialTestManager(t)
+	saveGlobalTelegramCredentials(t, db, secure, 123456, "global-hash")
+	for _, input := range []domain.AccountInput{
+		{Name: "id only", ConnectorConfig: map[string]string{"phone": "+85212345678", "apiId": "654321"}},
+		{Name: "hash only", ConnectorConfig: map[string]string{"phone": "+85212345678"}, ConnectorSecrets: map[string]string{"apiHash": "account-hash"}},
+	} {
+		if _, err := manager.CreateAccount(input); err == nil {
+			t.Fatalf("incomplete override should fail: %#v", input)
+		} else {
+			var inputErr connector.InputError
+			if !errors.As(err, &inputErr) {
+				t.Fatalf("error = %T, want connector.InputError", err)
+			}
+		}
+	}
+	account, err := manager.CreateAccount(domain.AccountInput{
+		Name: "legacy override", ConnectorConfig: map[string]string{"phone": "+85212345678", "apiId": "654321"}, ConnectorSecrets: map[string]string{"apiHash": "account-hash"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, encryptedHash, err := db.AccountCredentials(account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiID, apiHash, err := manager.resolveTelegramCredentials(stored, encryptedHash)
+	if err != nil || apiID != 654321 || apiHash != "account-hash" {
+		t.Fatalf("resolved override = %d, %q, %v", apiID, apiHash, err)
+	}
+}
 
 func TestPeerID(t *testing.T) {
 	t.Parallel()

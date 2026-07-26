@@ -168,6 +168,9 @@ func parseTime(value string) time.Time {
 
 func (s *Store) SaveAccount(input domain.AccountInput, encryptedHash []byte) (domain.Account, error) {
 	now := nowText()
+	if encryptedHash == nil {
+		encryptedHash = []byte{}
+	}
 	if input.Platform == "" {
 		input.Platform = domain.PlatformTelegram
 	}
@@ -513,6 +516,8 @@ func (s *Store) Settings() (domain.Settings, error) {
 	return value, err
 }
 func (s *Store) SaveSettings(value domain.Settings) error {
+	value.Telegram.APIHash = ""
+	value.Telegram.HasAPIHash = false
 	value.AI.APIKey = ""
 	value.AI.HasAPIKey = false
 	raw, err := encode(value)

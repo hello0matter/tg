@@ -115,3 +115,27 @@ func TestOutboxClaimsOnlyRequestedPlatform(t *testing.T) {
 		t.Fatalf("webhook claim = %#v, %v", job, err)
 	}
 }
+
+func TestSettingsScrubTelegramAPIHash(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	settings, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings.Telegram = domain.TelegramSettings{APIID: 123456, APIHash: "plaintext", HasAPIHash: true}
+	if err := s.SaveSettings(settings); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := s.Settings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Telegram.APIHash != "" || stored.Telegram.HasAPIHash || stored.Telegram.APIID != 123456 {
+		t.Fatalf("stored Telegram settings = %#v", stored.Telegram)
+	}
+}

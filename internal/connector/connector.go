@@ -32,11 +32,12 @@ type Capabilities struct {
 }
 
 type Descriptor struct {
-	Platform     string            `json:"platform"`
-	Name         string            `json:"name"`
-	Available    bool              `json:"available"`
-	Capabilities Capabilities      `json:"capabilities"`
-	Credentials  []CredentialField `json:"credentials"`
+	Platform                     string            `json:"platform"`
+	Name                         string            `json:"name"`
+	Available                    bool              `json:"available"`
+	DefaultCredentialsConfigured bool              `json:"defaultCredentialsConfigured"`
+	Capabilities                 Capabilities      `json:"capabilities"`
+	Credentials                  []CredentialField `json:"credentials"`
 }
 
 type CredentialField struct {
@@ -45,6 +46,7 @@ type CredentialField struct {
 	Kind        string `json:"kind"`
 	Secret      bool   `json:"secret"`
 	Required    bool   `json:"required"`
+	Shared      bool   `json:"shared"`
 	Placeholder string `json:"placeholder"`
 }
 

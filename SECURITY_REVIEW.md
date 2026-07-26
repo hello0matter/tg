@@ -38,6 +38,13 @@
 - 前端资源编译后嵌入 EXE，运行时不从 CDN 拉取代码。
 - 不提供绕过 Telegram 受保护内容或平台限流的能力。
 
+## Telegram 凭证与会话
+
+- 系统级 Telegram API Hash 存入加密 `secrets`，API ID 留在普通设置；GET 设置接口只返回 `hasApiHash` 状态，不回传 Hash。
+- 账号可选择完整的独立 API ID/Hash 覆盖。运行时只会选择完整账号凭证或完整全局凭证，不会跨来源拼接一对凭证。
+- 旧版本账号已有的 API ID/Hash 自动视为独立覆盖，不会因配置全局凭证而改变登录应用身份。
+- 每个账号继续使用以账号 ID 命名的独立 AES-GCM 加密 Session 文件。共享客户端应用凭证不会共享 Telegram 登录 Session。
+
 ## AI 与账号池新增边界
 
 - AI 默认关闭，启动、登录和对话发现不会触发 AI 请求。只有显式启用 AI 的线路会把规则处理后的消息正文发送到用户配置的 OpenAI 兼容 URL。

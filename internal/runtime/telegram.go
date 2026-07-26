@@ -33,7 +33,10 @@ import (
 	"tgworkbench/internal/vault"
 )
 
-const channelIDOffset int64 = 1_000_000_000_000
+const (
+	channelIDOffset       int64 = 1_000_000_000_000
+	telegramAPIHashSecret       = "telegram_api_hash"
+)
 
 type Manager struct {
 	store       *store.Store
@@ -110,18 +113,20 @@ func NewManager(dataDir string, store *store.Store, vault *vault.Vault, log *slo
 }
 
 func (m *Manager) Descriptor() connector.Descriptor {
+	_, _, credentialErr := m.resolveTelegramCredentials(domain.Account{}, nil)
 	return connector.Descriptor{
-		Platform:  connector.Telegram,
-		Name:      "Telegram 用户账号",
-		Available: true,
+		Platform:                     connector.Telegram,
+		Name:                         "Telegram 用户账号",
+		Available:                    true,
+		DefaultCredentialsConfigured: credentialErr == nil,
 		Capabilities: connector.Capabilities{
 			Text: true, Media: true, Albums: true, Edits: true, Deletes: true,
 			Threads: true, URLButtons: true, UserSessions: true,
 		},
 		Credentials: []connector.CredentialField{
 			{Key: "phone", Label: "手机号", Kind: "text", Required: true, Placeholder: "+86..."},
-			{Key: "apiId", Label: "API ID", Kind: "number", Required: true},
-			{Key: "apiHash", Label: "API Hash", Kind: "password", Secret: true, Required: true},
+			{Key: "apiId", Label: "API ID", Kind: "number", Shared: true},
+			{Key: "apiHash", Label: "API Hash", Kind: "password", Secret: true, Shared: true},
 		},
 	}
 }
@@ -144,17 +149,35 @@ func (m *Manager) CreateAccount(input domain.AccountInput) (domain.Account, erro
 	if input.APIHash == "" {
 		input.APIHash = input.ConnectorSecrets["apiHash"]
 	}
-	if input.Name == "" || input.Phone == "" || input.APIID <= 0 || len(input.APIHash) < 8 {
-		return domain.Account{}, connector.InputError{Message: "名称、手机号、API ID 和 API Hash 均为必填项"}
+	input.APIHash = strings.TrimSpace(input.APIHash)
+	if input.Name == "" || input.Phone == "" {
+		return domain.Account{}, connector.InputError{Message: "账号备注和手机号均为必填项"}
+	}
+	hasOverrideID := input.APIID > 0
+	hasOverrideHash := input.APIHash != ""
+	if hasOverrideID != hasOverrideHash {
+		return domain.Account{}, connector.InputError{Message: "独立 API ID 和 API Hash 必须同时填写"}
+	}
+	if input.APIID < 0 || (hasOverrideHash && len(input.APIHash) < 8) {
+		return domain.Account{}, connector.InputError{Message: "独立 API ID 或 API Hash 无效"}
 	}
 	if input.ConnectorConfig == nil {
 		input.ConnectorConfig = make(map[string]string)
 	}
 	input.ConnectorConfig["phone"] = input.Phone
-	input.ConnectorConfig["apiId"] = strconv.Itoa(input.APIID)
-	encrypted, err := m.vault.Encrypt(input.APIHash)
-	if err != nil {
-		return domain.Account{}, err
+	delete(input.ConnectorConfig, "apiId")
+	var encrypted []byte
+	if hasOverrideID {
+		input.ConnectorConfig["apiId"] = strconv.Itoa(input.APIID)
+		var err error
+		encrypted, err = m.vault.Encrypt(input.APIHash)
+		if err != nil {
+			return domain.Account{}, err
+		}
+	} else {
+		if _, _, err := m.resolveTelegramCredentials(domain.Account{}, nil); err != nil {
+			return domain.Account{}, connector.InputError{Message: "请先在系统设置中配置 Telegram 客户端凭证，或为此账号填写独立 API 凭证"}
+		}
 	}
 	return m.store.SaveAccount(input, encrypted)
 }
@@ -170,11 +193,12 @@ func (m *Manager) Connect(accountID string) error {
 		m.mu.Unlock()
 		return fmt.Errorf("读取账号: %w", err)
 	}
-	apiHash, err := m.vault.Decrypt(encryptedHash)
+	apiID, apiHash, err := m.resolveTelegramCredentials(account, encryptedHash)
 	if err != nil {
 		m.mu.Unlock()
-		return fmt.Errorf("解密 API Hash: %w", err)
+		return err
 	}
+	account.APIID = apiID
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &accountSession{
 		accountID: accountID,
@@ -198,6 +222,32 @@ func (m *Manager) Connect(accountID string) error {
 	}
 	go m.run(ctx, account, apiHash, s)
 	return nil
+}
+
+func (m *Manager) resolveTelegramCredentials(account domain.Account, encryptedAccountHash []byte) (int, string, error) {
+	if account.APIID > 0 || len(encryptedAccountHash) > 0 {
+		if account.APIID <= 0 || len(encryptedAccountHash) == 0 {
+			return 0, "", errors.New("账号的独立 Telegram API 凭证不完整")
+		}
+		apiHash, err := m.vault.Decrypt(encryptedAccountHash)
+		if err != nil {
+			return 0, "", fmt.Errorf("解密账号 API Hash: %w", err)
+		}
+		return account.APIID, apiHash, nil
+	}
+	settings, err := m.store.Settings()
+	if err != nil {
+		return 0, "", fmt.Errorf("读取 Telegram 客户端凭证: %w", err)
+	}
+	encryptedHash, err := m.store.Secret(telegramAPIHashSecret)
+	if err != nil || settings.Telegram.APIID <= 0 || len(encryptedHash) == 0 {
+		return 0, "", errors.New("尚未配置可用的 Telegram 客户端凭证")
+	}
+	apiHash, err := m.vault.Decrypt(encryptedHash)
+	if err != nil {
+		return 0, "", fmt.Errorf("解密全局 Telegram API Hash: %w", err)
+	}
+	return settings.Telegram.APIID, apiHash, nil
 }
 
 func (m *Manager) run(ctx context.Context, account domain.Account, apiHash string, s *accountSession) {

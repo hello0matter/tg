@@ -159,13 +159,20 @@ type Dashboard struct {
 }
 
 type Settings struct {
-	ListenAddress    string     `json:"listenAddress"`
-	RetentionDays    int        `json:"retentionDays"`
-	MediaCacheMB     int        `json:"mediaCacheMb"`
-	OpenBrowser      bool       `json:"openBrowser"`
-	StartWithWindows bool       `json:"startWithWindows"`
-	ProxyURL         string     `json:"proxyUrl"`
-	AI               AISettings `json:"ai"`
+	ListenAddress    string           `json:"listenAddress"`
+	RetentionDays    int              `json:"retentionDays"`
+	MediaCacheMB     int              `json:"mediaCacheMb"`
+	OpenBrowser      bool             `json:"openBrowser"`
+	StartWithWindows bool             `json:"startWithWindows"`
+	ProxyURL         string           `json:"proxyUrl"`
+	Telegram         TelegramSettings `json:"telegram"`
+	AI               AISettings       `json:"ai"`
+}
+
+type TelegramSettings struct {
+	APIID      int    `json:"apiId"`
+	APIHash    string `json:"apiHash"`
+	HasAPIHash bool   `json:"hasApiHash"`
 }
 
 type AISettings struct {
