@@ -39,3 +39,13 @@
   .settings-actions { flex-direction: column; }
   .settings-actions button { width: 100%; }
 }
+
+.error-strip {
+  color: #991b1b;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+.error-strip span {
+  color: inherit;
+  overflow-wrap: anywhere;
+}

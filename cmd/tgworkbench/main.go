@@ -62,8 +62,15 @@ func main() {
 	accounts, err := db.ListAccounts()
 	fatalIf(log, err)
 	for _, account := range accounts {
-		if err := connectors.Connect(account.ID); err != nil {
-			log.Warn("restore Telegram account", "account", account.Name, "error", err)
+		switch account.Status {
+		case "connected":
+			if err := connectors.Connect(account.ID); err != nil {
+				log.Warn("restore Telegram account", "account", account.Name, "error", err)
+			}
+		case "connecting", "awaiting_code", "awaiting_password":
+			if err := connectors.Disconnect(account.ID); err != nil {
+				log.Warn("reset interrupted Telegram login", "account", account.Name, "error", err)
+			}
 		}
 	}
 	httpServer := &http.Server{Addr: listen, Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}

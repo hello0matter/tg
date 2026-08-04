@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -104,6 +105,44 @@ func TestAccountTelegramCredentialsAreAtomicAndOverrideGlobal(t *testing.T) {
 	apiID, apiHash, err := manager.resolveTelegramCredentials(stored, encryptedHash)
 	if err != nil || apiID != 654321 || apiHash != "account-hash" {
 		t.Fatalf("resolved override = %d, %q, %v", apiID, apiHash, err)
+	}
+}
+
+func TestDuplicateConnectIsRejectedWithoutStartingAnotherLogin(t *testing.T) {
+	manager, _, _ := newCredentialTestManager(t)
+	manager.sessions["active"] = &accountSession{}
+
+	err := manager.Connect("active")
+	var inputErr connector.InputError
+	if !errors.As(err, &inputErr) {
+		t.Fatalf("error = %T, want connector.InputError", err)
+	}
+}
+
+func TestInitialConnectionWatchdogCancelsStalledLogin(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	ready := make(chan struct{})
+	done := make(chan struct{})
+	go watchInitialTelegramConnection(ctx, ready, done, 10*time.Millisecond, cancel)
+
+	select {
+	case <-ctx.Done():
+		if !errors.Is(context.Cause(ctx), errInitialConnectionTimeout) {
+			t.Fatalf("cause = %v, want initial connection timeout", context.Cause(ctx))
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watchdog did not cancel stalled login")
+	}
+}
+
+func TestAuthenticatorReadySignalIsIdempotent(t *testing.T) {
+	authenticator := &webAuthenticator{ready: make(chan struct{})}
+	authenticator.markReady()
+	authenticator.markReady()
+	select {
+	case <-authenticator.ready:
+	default:
+		t.Fatal("authenticator did not publish readiness")
 	}
 }
 

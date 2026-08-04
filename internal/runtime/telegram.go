@@ -34,8 +34,15 @@ import (
 )
 
 const (
-	channelIDOffset       int64 = 1_000_000_000_000
-	telegramAPIHashSecret       = "telegram_api_hash"
+	channelIDOffset                  int64 = 1_000_000_000_000
+	telegramAPIHashSecret                  = "telegram_api_hash"
+	telegramDialTimeout                    = 10 * time.Second
+	telegramInitialConnectionTimeout       = 30 * time.Second
+)
+
+var (
+	errAccountDisconnected      = errors.New("Telegram \u8fde\u63a5\u5df2\u53d6\u6d88")
+	errInitialConnectionTimeout = errors.New("Telegram \u521d\u59cb\u8fde\u63a5\u8d85\u65f6\uff0c\u8bf7\u68c0\u67e5\u4ee3\u7406\u6216\u7f51\u7edc\u540e\u91cd\u8bd5")
 )
 
 type Manager struct {
@@ -63,7 +70,7 @@ type adminCache struct {
 
 type accountSession struct {
 	accountID string
-	cancel    context.CancelFunc
+	cancel    context.CancelCauseFunc
 	auth      *webAuthenticator
 
 	mu     sync.RWMutex
@@ -91,6 +98,8 @@ type webAuthenticator struct {
 	store     *store.Store
 	code      chan string
 	password  chan string
+	ready     chan struct{}
+	readyOnce sync.Once
 }
 
 func NewManager(dataDir string, store *store.Store, vault *vault.Vault, log *slog.Logger) *Manager {
@@ -186,7 +195,7 @@ func (m *Manager) Connect(accountID string) error {
 	m.mu.Lock()
 	if _, exists := m.sessions[accountID]; exists {
 		m.mu.Unlock()
-		return nil
+		return connector.InputError{Message: "\u8be5\u8d26\u53f7\u5df2\u5728\u8fde\u63a5\u6216\u767b\u5f55\u4e2d\uff0c\u8bf7\u7b49\u5f85\u6216\u5148\u53d6\u6d88\u5f53\u524d\u8fde\u63a5"}
 	}
 	account, encryptedHash, err := m.store.AccountCredentials(accountID)
 	if err != nil {
@@ -199,7 +208,7 @@ func (m *Manager) Connect(accountID string) error {
 		return err
 	}
 	account.APIID = apiID
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancelCause(context.Background())
 	s := &accountSession{
 		accountID: accountID,
 		cancel:    cancel,
@@ -212,6 +221,7 @@ func (m *Manager) Connect(accountID string) error {
 		store:     m.store,
 		code:      make(chan string),
 		password:  make(chan string),
+		ready:     make(chan struct{}),
 	}
 	m.sessions[accountID] = s
 	m.mu.Unlock()
@@ -268,6 +278,7 @@ func (m *Manager) run(ctx context.Context, account domain.Account, apiHash strin
 		return m.handleDeletedMessages(ctx, s, -channelIDOffset-update.ChannelID, update.Messages)
 	})
 	options := telegram.Options{
+		DialTimeout: telegramDialTimeout,
 		SessionStorage: &encryptedSessionStorage{
 			path:  filepath.Join(m.dataDir, "sessions", account.ID+".session"),
 			vault: m.vault,
@@ -292,11 +303,16 @@ func (m *Manager) run(ctx context.Context, account domain.Account, apiHash strin
 	s.client = client
 	s.mu.Unlock()
 
+	watchdogDone := make(chan struct{})
+	defer close(watchdogDone)
+	go watchInitialTelegramConnection(ctx, s.auth.ready, watchdogDone, telegramInitialConnectionTimeout, s.cancel)
+
 	err := client.Run(ctx, func(ctx context.Context) error {
 		flow := auth.NewFlow(s.auth, auth.SendCodeOptions{})
 		if err := client.Auth().IfNecessary(ctx, flow); err != nil {
 			return err
 		}
+		s.auth.markReady()
 		status, err := client.Auth().Status(ctx)
 		if err != nil {
 			return err
@@ -318,13 +334,35 @@ func (m *Manager) run(ctx context.Context, account domain.Account, apiHash strin
 	})
 
 	m.remove(account.ID)
-	if ctx.Err() != nil {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, errAccountDisconnected) {
 		_ = m.store.UpdateAccountStatus(account.ID, "disconnected", account.Username, "", account.UserID)
 		return
 	}
+	if cause != nil {
+		message := cause.Error()
+		_ = m.store.UpdateAccountStatus(account.ID, "error", account.Username, message, account.UserID)
+		m.activity("error", "account", "Telegram \u8fde\u63a5\u5931\u8d25: "+message, "")
+		return
+	}
+	if err == nil {
+		err = errors.New("Telegram \u8fde\u63a5\u610f\u5916\u7ed3\u675f")
+	}
 	message := err.Error()
 	_ = m.store.UpdateAccountStatus(account.ID, "error", account.Username, message, account.UserID)
-	m.activity("error", "account", "Telegram 连接失败: "+message, "")
+	m.activity("error", "account", "Telegram \u8fde\u63a5\u5931\u8d25: "+message, "")
+}
+
+func watchInitialTelegramConnection(ctx context.Context, ready, done <-chan struct{}, timeout time.Duration, cancel context.CancelCauseFunc) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-ready:
+	case <-done:
+	case <-ctx.Done():
+	case <-timer.C:
+		cancel(errInitialConnectionTimeout)
+	}
 }
 
 func (m *Manager) failConnection(account domain.Account, err error) {
@@ -375,7 +413,7 @@ func (m *Manager) Disconnect(accountID string) error {
 	if !ok {
 		return m.store.UpdateAccountStatus(accountID, "disconnected", "", "", 0)
 	}
-	s.cancel()
+	s.cancel(errAccountDisconnected)
 	return nil
 }
 
@@ -611,7 +649,7 @@ func (m *Manager) Close() {
 	}
 	m.mu.RUnlock()
 	for _, s := range sessions {
-		s.cancel()
+		s.cancel(errAccountDisconnected)
 	}
 }
 
@@ -1610,6 +1648,7 @@ func (s *accountSession) peer(chatID int64) (tg.InputPeerClass, error) {
 func (a *webAuthenticator) Phone(context.Context) (string, error) { return a.phone, nil }
 
 func (a *webAuthenticator) Code(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+	a.markReady()
 	if err := a.store.UpdateAccountStatus(a.accountID, "awaiting_code", "", "", 0); err != nil {
 		return "", err
 	}
@@ -1623,6 +1662,7 @@ func (a *webAuthenticator) Code(ctx context.Context, _ *tg.AuthSentCode) (string
 }
 
 func (a *webAuthenticator) Password(ctx context.Context) (string, error) {
+	a.markReady()
 	if err := a.store.UpdateAccountStatus(a.accountID, "awaiting_password", "", "", 0); err != nil {
 		return "", err
 	}
@@ -1633,6 +1673,12 @@ func (a *webAuthenticator) Password(ctx context.Context) (string, error) {
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
+}
+
+func (a *webAuthenticator) markReady() {
+	a.readyOnce.Do(func() {
+		close(a.ready)
+	})
 }
 
 func (*webAuthenticator) AcceptTermsOfService(context.Context, tg.HelpTermsOfService) error {
