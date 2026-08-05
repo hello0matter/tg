@@ -163,6 +163,29 @@ func TestPeerID(t *testing.T) {
 	}
 }
 
+func TestHandleNewChannelMessageWithoutRoutes(t *testing.T) {
+	manager, _, _ := newCredentialTestManager(t)
+	update := &tg.UpdateNewChannelMessage{Message: &tg.Message{PeerID: &tg.PeerChannel{ChannelID: 42}}}
+	if err := manager.handleNewChannelMessage(context.Background(), &accountSession{accountID: "account"}, tg.Entities{}, update); err != nil {
+		t.Fatalf("handle new channel message: %v", err)
+	}
+}
+
+func TestCacheKeepsKnownChannelAccessHashForMinimalUpdates(t *testing.T) {
+	chatID := int64(-1_000_000_000_042)
+	session := &accountSession{
+		peers: map[int64]tg.InputPeerClass{
+			chatID: &tg.InputPeerChannel{ChannelID: 42, AccessHash: 99},
+		},
+		info: map[int64]domain.PeerRef{},
+	}
+	session.cache(nil, []tg.ChatClass{&tg.Channel{ID: 42, Min: true, Title: "minimal"}})
+	peer, ok := session.peers[chatID].(*tg.InputPeerChannel)
+	if !ok || peer.AccessHash != 99 {
+		t.Fatalf("cached channel peer = %#v, want retained access hash", session.peers[chatID])
+	}
+}
+
 func TestFormatButtons(t *testing.T) {
 	t.Parallel()
 	markup := &tg.ReplyInlineMarkup{Rows: []tg.KeyboardButtonRow{{Buttons: []tg.KeyboardButtonClass{

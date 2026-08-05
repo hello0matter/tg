@@ -265,6 +265,9 @@ func (m *Manager) run(ctx context.Context, account domain.Account, apiHash strin
 	dispatcher.OnNewMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewMessage) error {
 		return m.handleNewMessage(ctx, s, entities, update)
 	})
+	dispatcher.OnNewChannelMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
+		return m.handleNewChannelMessage(ctx, s, entities, update)
+	})
 	dispatcher.OnEditMessage(func(ctx context.Context, entities tg.Entities, update *tg.UpdateEditMessage) error {
 		return m.handleEditedMessage(ctx, s, entities, update.Message)
 	})
@@ -716,7 +719,11 @@ func (s *accountSession) cache(users []tg.UserClass, chats []tg.ChatClass) {
 			s.info[-chat.ID] = domain.PeerRef{Platform: connector.Telegram, ConnectorID: s.accountID, ChatID: -chat.ID, Title: chat.Title, Kind: "group"}
 		case *tg.Channel:
 			id := -channelIDOffset - chat.ID
-			s.peers[id] = &tg.InputPeerChannel{ChannelID: chat.ID, AccessHash: chat.AccessHash}
+			accessHash := chat.AccessHash
+			if existing, ok := s.peers[id].(*tg.InputPeerChannel); ok && (chat.Min || accessHash == 0) {
+				accessHash = existing.AccessHash
+			}
+			s.peers[id] = &tg.InputPeerChannel{ChannelID: chat.ID, AccessHash: accessHash}
 			kind := "channel"
 			if chat.Megagroup {
 				kind = "group"
@@ -742,7 +749,15 @@ func (s *accountSession) cacheEntities(entities tg.Entities) {
 }
 
 func (m *Manager) handleNewMessage(ctx context.Context, s *accountSession, entities tg.Entities, update *tg.UpdateNewMessage) error {
-	msg, ok := update.Message.(*tg.Message)
+	return m.handleIncomingMessage(ctx, s, entities, update.Message)
+}
+
+func (m *Manager) handleNewChannelMessage(ctx context.Context, s *accountSession, entities tg.Entities, update *tg.UpdateNewChannelMessage) error {
+	return m.handleIncomingMessage(ctx, s, entities, update.Message)
+}
+
+func (m *Manager) handleIncomingMessage(ctx context.Context, s *accountSession, entities tg.Entities, message tg.MessageClass) error {
+	msg, ok := message.(*tg.Message)
 	if !ok || msg.Out {
 		return nil
 	}
