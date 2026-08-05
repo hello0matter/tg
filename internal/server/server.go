@@ -35,7 +35,7 @@ type Runtime interface {
 	SubmitCode(accountID, code string) error
 	SubmitPassword(accountID, password string) error
 	Approve(reviewID string) error
-	SendManual(routeID, text string) error
+	SendManual(routeID, text string, destination domain.ManualDestination) error
 	ListPeers(accountID string) ([]domain.PeerRef, error)
 }
 
@@ -261,7 +261,8 @@ func (s *Server) deleteRoute(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) manualSend(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Text string `json:"text"`
+		Text        string                   `json:"text"`
+		Destination domain.ManualDestination `json:"destination"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -270,9 +271,20 @@ func (s *Server) manualSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "消息内容不能为空")
 		return
 	}
-	err := s.runtime.SendManual(r.PathValue("id"), input.Text)
+	if input.Destination == "" {
+		input.Destination = domain.ManualDestinationTargets
+	}
+	if input.Destination != domain.ManualDestinationSources && input.Destination != domain.ManualDestinationTargets {
+		writeError(w, http.StatusBadRequest, "手工消息发送方向无效")
+		return
+	}
+	err := s.runtime.SendManual(r.PathValue("id"), input.Text, input.Destination)
 	if err == nil {
-		s.record("info", "manual", "已手工插入一条消息", r.PathValue("id"))
+		label := map[domain.ManualDestination]string{
+			domain.ManualDestinationSources: "来源群",
+			domain.ManualDestinationTargets: "目标群",
+		}[input.Destination]
+		s.record("info", "manual", "已向"+label+"加入一条手工消息", r.PathValue("id"))
 	}
 	respondAccepted(w, err)
 }

@@ -214,6 +214,50 @@ func TestTargetMessageIsQueuedBackToSourceAndMappedMessagesAreSkipped(t *testing
 	}
 }
 
+func TestManualSourceMessageDoesNotMirrorBackToTarget(t *testing.T) {
+	manager, db, _ := newCredentialTestManager(t)
+	manager.queueCancel()
+	_, err := db.SaveRoute(domain.Route{
+		ID:                 "route",
+		Name:               "mirror",
+		AccountID:          "account",
+		SenderAccountIDs:   []string{"account"},
+		Sources:            []domain.PeerRef{{ChatID: -1001, Title: "source"}},
+		Targets:            []domain.PeerRef{{ChatID: -1002, Title: "target"}},
+		Mode:               "copy",
+		ReviewMode:         "rules",
+		ReverseOwnMessages: true,
+		Enabled:            true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.SendManual("route", "question", domain.ManualDestinationSources); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := db.ListOutbox("pending", 10)
+	if err != nil || len(jobs) != 1 || jobs[0].Target.ChatID != -1001 || jobs[0].Text != "question" {
+		t.Fatalf("manual source jobs = %#v, %v", jobs, err)
+	}
+
+	session := &accountSession{accountID: "account", peers: make(map[int64]tg.InputPeerClass), info: make(map[int64]domain.PeerRef)}
+	outgoingSource := &tg.Message{ID: 20, Out: true, PeerID: &tg.PeerChat{ChatID: 1001}, Message: "question"}
+	if err := manager.handleIncomingMessage(context.Background(), session, tg.Entities{}, outgoingSource); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = db.ListOutbox("pending", 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("outgoing source message should not enqueue a target copy: %#v, %v", jobs, err)
+	}
+	if err := manager.SendManual("route", "announcement", domain.ManualDestinationTargets); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = db.ListOutbox("pending", 10)
+	if err != nil || len(jobs) != 2 || jobs[1].Target.ChatID != -1002 || jobs[1].Text != "announcement" {
+		t.Fatalf("manual target jobs = %#v, %v", jobs, err)
+	}
+}
+
 func TestCacheKeepsKnownChannelAccessHashForMinimalUpdates(t *testing.T) {
 	chatID := int64(-1_000_000_000_042)
 	session := &accountSession{

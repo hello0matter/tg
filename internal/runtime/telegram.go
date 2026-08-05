@@ -459,18 +459,29 @@ func (m *Manager) Approve(reviewID string) error {
 	if item.Status != "pending" {
 		return errors.New("该审核项已经处理")
 	}
-	return m.SendManual(item.RouteID, item.FinalText)
+	return m.SendManual(item.RouteID, item.FinalText, domain.ManualDestinationTargets)
 }
 
-func (m *Manager) SendManual(routeID, text string) error {
+func (m *Manager) SendManual(routeID, text string, destination domain.ManualDestination) error {
 	route, err := m.store.Route(routeID)
 	if err != nil {
 		return err
 	}
-	return m.enqueueText(route, text, nil, nil)
+	switch destination {
+	case domain.ManualDestinationSources:
+		return m.enqueueTextToPeers(route, route.Sources, text, nil, nil)
+	case domain.ManualDestinationTargets:
+		return m.enqueueText(route, text, nil, nil)
+	default:
+		return errors.New("手工消息发送方向无效")
+	}
 }
 
 func (m *Manager) enqueueText(route domain.Route, text string, buttons []domain.ButtonLink, source *sourceMessage) error {
+	return m.enqueueTextToPeers(route, route.Targets, text, buttons, source)
+}
+
+func (m *Manager) enqueueTextToPeers(route domain.Route, peers []domain.PeerRef, text string, buttons []domain.ButtonLink, source *sourceMessage) error {
 	if strings.TrimSpace(text) == "" {
 		return errors.New("发送内容为空")
 	}
@@ -478,8 +489,8 @@ func (m *Manager) enqueueText(route domain.Route, text string, buttons []domain.
 	if len(accountIDs) == 0 {
 		accountIDs = []string{route.AccountID}
 	}
-	jobs := make([]domain.OutboxJob, 0, len(route.Targets))
-	for _, target := range route.Targets {
+	jobs := make([]domain.OutboxJob, 0, len(peers))
+	for _, target := range peers {
 		platform := target.Platform
 		if platform == "" {
 			platform = connector.Telegram

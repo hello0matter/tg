@@ -225,3 +225,10 @@ type OutboxJob struct {
 }
 
 const OutboxReasonDailyLimit = "已达到该账号每日发送上限"
+
+type ManualDestination string
+
+const (
+	ManualDestinationSources ManualDestination = "sources"
+	ManualDestinationTargets ManualDestination = "targets"
+)

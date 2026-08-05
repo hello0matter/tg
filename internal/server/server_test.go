@@ -28,13 +28,13 @@ func (stubRuntime) CreateAccount(domain.AccountInput) (domain.Account, error) {
 	return domain.Account{}, nil
 }
 
-func (stubRuntime) Connect(string) error                       { return nil }
-func (stubRuntime) Disconnect(string) error                    { return nil }
-func (stubRuntime) SubmitCode(string, string) error            { return nil }
-func (stubRuntime) SubmitPassword(string, string) error        { return nil }
-func (stubRuntime) Approve(string) error                       { return nil }
-func (stubRuntime) SendManual(string, string) error            { return nil }
-func (stubRuntime) ListPeers(string) ([]domain.PeerRef, error) { return []domain.PeerRef{}, nil }
+func (stubRuntime) Connect(string) error                                      { return nil }
+func (stubRuntime) Disconnect(string) error                                   { return nil }
+func (stubRuntime) SubmitCode(string, string) error                           { return nil }
+func (stubRuntime) SubmitPassword(string, string) error                       { return nil }
+func (stubRuntime) Approve(string) error                                      { return nil }
+func (stubRuntime) SendManual(string, string, domain.ManualDestination) error { return nil }
+func (stubRuntime) ListPeers(string) ([]domain.PeerRef, error)                { return []domain.PeerRef{}, nil }
 
 func TestLocalHostOnly(t *testing.T) {
 	t.Parallel()

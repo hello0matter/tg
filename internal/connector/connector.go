@@ -60,7 +60,7 @@ type Adapter interface {
 	SubmitCode(accountID, code string) error
 	SubmitPassword(accountID, password string) error
 	Approve(reviewID string) error
-	SendManual(routeID, text string) error
+	SendManual(routeID, text string, destination domain.ManualDestination) error
 	ListPeers(accountID string) ([]domain.PeerRef, error)
 }
 
@@ -158,12 +158,12 @@ func (r *Registry) Approve(reviewID string) error {
 	return adapter.Approve(reviewID)
 }
 
-func (r *Registry) SendManual(routeID, text string) error {
+func (r *Registry) SendManual(routeID, text string, destination domain.ManualDestination) error {
 	adapter, err := r.forRoute(routeID)
 	if err != nil {
 		return err
 	}
-	return adapter.SendManual(routeID, text)
+	return adapter.SendManual(routeID, text, destination)
 }
 
 func (r *Registry) ListPeers(accountID string) ([]domain.PeerRef, error) {
