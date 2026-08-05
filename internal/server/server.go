@@ -82,6 +82,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/activity", s.activity)
 	mux.HandleFunc("GET /api/outbox", s.outbox)
 	mux.HandleFunc("POST /api/outbox/{id}/retry", s.retryOutbox)
+	mux.HandleFunc("POST /api/outbox/release-limits", s.releaseLimitedOutbox)
+	mux.HandleFunc("POST /api/outbox/cancel-pending", s.cancelPendingOutbox)
 	mux.HandleFunc("GET /api/settings", s.settings)
 	mux.HandleFunc("PUT /api/settings", s.saveSettings)
 	mux.HandleFunc("POST /api/ai/preview", s.aiPreview)
@@ -380,6 +382,26 @@ func (s *Server) retryOutbox(w http.ResponseWriter, r *http.Request) {
 	}
 	respondAccepted(w, err)
 }
+func (s *Server) releaseLimitedOutbox(w http.ResponseWriter, _ *http.Request) {
+	count, err := s.store.ReactivateDailyLimitedOutbox()
+	if err == nil && count > 0 {
+		s.record("info", "queue", fmt.Sprintf("已重新检查 %d 条因每日上限延期的任务", count), "")
+	}
+	respond(w, map[string]int64{"count": count}, err)
+}
+func (s *Server) cancelPendingOutbox(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		RouteID string `json:"routeId"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	count, err := s.store.CancelPendingOutbox(strings.TrimSpace(input.RouteID))
+	if err == nil && count > 0 {
+		s.record("warning", "queue", fmt.Sprintf("已取消 %d 条等待发送的任务", count), input.RouteID)
+	}
+	respond(w, map[string]int64{"count": count}, err)
+}
 func (s *Server) settings(w http.ResponseWriter, _ *http.Request) {
 	value, err := s.store.Settings()
 	if err == nil {
@@ -439,7 +461,18 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, err)
 		return
 	}
+	previous, previousErr := s.store.Settings()
 	value, err := s.persistSettings(value)
+	if err == nil && previousErr == nil && value.Delivery.DailyLimit > previous.Delivery.DailyLimit {
+		count, releaseErr := s.store.ReactivateDailyLimitedOutbox()
+		if releaseErr != nil {
+			writeInternal(w, releaseErr)
+			return
+		}
+		if count > 0 {
+			s.record("info", "queue", fmt.Sprintf("发送上限已调高，重新激活 %d 条延期任务", count), "")
+		}
+	}
 	respond(w, value, err)
 }
 

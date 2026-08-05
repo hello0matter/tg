@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"tgworkbench/internal/connector"
 	"tgworkbench/internal/domain"
@@ -155,5 +156,47 @@ func TestTelegramAPIHashIsEncryptedPreservedAndNotReturned(t *testing.T) {
 	}
 	if returned.Telegram.APIHash != "" || !returned.Telegram.HasAPIHash || returned.Telegram.APIID != 123456 {
 		t.Fatalf("returned Telegram settings = %#v", returned.Telegram)
+	}
+}
+
+func TestOutboxMaintenanceAPI(t *testing.T) {
+	dataDir := t.TempDir()
+	db, err := store.Open(filepath.Join(dataDir, "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	secure, err := vault.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EnqueueOutbox([]domain.OutboxJob{{
+		RouteID: "route", Target: domain.PeerRef{ChatID: -1}, Text: "test", OrderKey: "-1:0", DedupeKey: "test", SenderAccountIDs: []string{"account"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := db.ClaimOutbox(domain.PlatformTelegram, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.DeferOutbox(job.ID, domain.OutboxReasonDailyLimit, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	s := New(db, secure, stubRuntime{}, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("ok")}}, slog.Default())
+
+	releaseRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/outbox/release-limits", strings.NewReader(`{}`))
+	releaseRequest.Host = "127.0.0.1:8765"
+	releaseResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(releaseResponse, releaseRequest)
+	if releaseResponse.Code != http.StatusOK || !strings.Contains(releaseResponse.Body.String(), `"count":1`) {
+		t.Fatalf("release response = %d %s", releaseResponse.Code, releaseResponse.Body.String())
+	}
+
+	cancelRequest := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/outbox/cancel-pending", strings.NewReader(`{}`))
+	cancelRequest.Host = "127.0.0.1:8765"
+	cancelResponse := httptest.NewRecorder()
+	s.Handler().ServeHTTP(cancelResponse, cancelRequest)
+	if cancelResponse.Code != http.StatusOK || !strings.Contains(cancelResponse.Body.String(), `"count":1`) {
+		t.Fatalf("cancel response = %d %s", cancelResponse.Code, cancelResponse.Body.String())
 	}
 }

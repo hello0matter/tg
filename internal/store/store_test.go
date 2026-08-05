@@ -95,6 +95,67 @@ func TestOutboxPreservesOrderPerTarget(t *testing.T) {
 	}
 }
 
+func TestReactivateDailyLimitedOutbox(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.EnqueueOutbox([]domain.OutboxJob{
+		{RouteID: "r", Target: domain.PeerRef{ChatID: -1}, Text: "first", OrderKey: "-1:0", DedupeKey: "first", SenderAccountIDs: []string{"a"}},
+		{RouteID: "r", Target: domain.PeerRef{ChatID: -1}, Text: "second", OrderKey: "-1:0", DedupeKey: "second", SenderAccountIDs: []string{"a"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeferOutbox(first.ID, domain.OutboxReasonDailyLimit, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("daily-limited job did not block its order key: %v", err)
+	}
+	count, err := s.ReactivateDailyLimitedOutbox()
+	if err != nil || count != 1 {
+		t.Fatalf("reactivated jobs = %d, %v", count, err)
+	}
+	reactivated, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute)
+	if err != nil || reactivated.ID != first.ID || reactivated.LastError != "" {
+		t.Fatalf("reactivated claim = %#v, %v", reactivated, err)
+	}
+}
+
+func TestCancelPendingOutboxByRoute(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.EnqueueOutbox([]domain.OutboxJob{
+		{RouteID: "cancel", Target: domain.PeerRef{ChatID: -1}, Text: "one", OrderKey: "-1:0", DedupeKey: "one", SenderAccountIDs: []string{"a"}},
+		{RouteID: "cancel", Target: domain.PeerRef{ChatID: -1}, Text: "two", OrderKey: "-1:0", DedupeKey: "two", SenderAccountIDs: []string{"a"}},
+		{RouteID: "keep", Target: domain.PeerRef{ChatID: -2}, Text: "keep", OrderKey: "-2:0", DedupeKey: "keep", SenderAccountIDs: []string{"a"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	count, err := s.CancelPendingOutbox("cancel")
+	if err != nil || count != 2 {
+		t.Fatalf("cancelled jobs = %d, %v", count, err)
+	}
+	cancelled, err := s.ListOutbox("cancelled", 10)
+	if err != nil || len(cancelled) != 2 {
+		t.Fatalf("cancelled list = %#v, %v", cancelled, err)
+	}
+	job, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute)
+	if err != nil || job.RouteID != "keep" {
+		t.Fatalf("remaining claim = %#v, %v", job, err)
+	}
+}
+
 func TestOutboxClaimsOnlyRequestedPlatform(t *testing.T) {
 	t.Parallel()
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))

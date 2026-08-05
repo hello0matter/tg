@@ -569,7 +569,7 @@ func (m *Manager) processOutbox(ctx context.Context, job domain.OutboxJob) {
 	}
 	if sentToday >= settings.Delivery.DailyLimit {
 		nextDay := startOfDay.AddDate(0, 0, 1)
-		_ = m.store.DeferOutbox(job.ID, "已达到该账号每日发送上限", nextDay)
+		_ = m.store.DeferOutbox(job.ID, domain.OutboxReasonDailyLimit, nextDay)
 		m.activity("warning", "delivery", "已达到账号每日发送上限，任务将在次日继续", job.RouteID)
 		return
 	}

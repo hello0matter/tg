@@ -223,3 +223,5 @@ type OutboxJob struct {
 	CreatedAt         time.Time    `json:"createdAt"`
 	UpdatedAt         time.Time    `json:"updatedAt"`
 }
+
+const OutboxReasonDailyLimit = "已达到该账号每日发送上限"

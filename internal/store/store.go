@@ -724,6 +724,28 @@ func (s *Store) RequeueOutbox(jobID string) error {
 	return nil
 }
 
+func (s *Store) ReactivateDailyLimitedOutbox() (int64, error) {
+	result, err := s.db.Exec(`UPDATE outbox_jobs SET last_error='',available_at=?,updated_at=? WHERE status='pending' AND last_error=?`, nowText(), nowText(), domain.OutboxReasonDailyLimit)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+func (s *Store) CancelPendingOutbox(routeID string) (int64, error) {
+	query := `UPDATE outbox_jobs SET status='cancelled',assigned_account_id='',last_error='已由用户取消',lease_until='',updated_at=? WHERE status='pending'`
+	args := []any{nowText()}
+	if routeID != "" {
+		query += ` AND route_id=?`
+		args = append(args, routeID)
+	}
+	result, err := s.db.Exec(query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 func (s *Store) ListOutbox(status string, limit int) ([]domain.OutboxJob, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
@@ -734,7 +756,11 @@ func (s *Store) ListOutbox(status string, limit int) ([]domain.OutboxJob, error)
 		query += ` WHERE status=?`
 		args = append(args, status)
 	}
-	query += ` ORDER BY created_at DESC LIMIT ?`
+	if status == "pending" || status == "processing" {
+		query += ` ORDER BY created_at ASC LIMIT ?`
+	} else {
+		query += ` ORDER BY created_at DESC LIMIT ?`
+	}
 	args = append(args, limit)
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
@@ -760,7 +786,9 @@ func (s *Store) Dashboard() (domain.Dashboard, error) {
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM reviews WHERE status='pending'`).Scan(&d.PendingReview); err != nil {
 		return d, err
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM activities WHERE category='sent' AND created_at>=date('now')`).Scan(&d.SentToday); err != nil {
+	now := time.Now()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()).UTC().Format(time.RFC3339Nano)
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM outbox_jobs WHERE status='sent' AND updated_at>=?`, startOfDay).Scan(&d.SentToday); err != nil {
 		return d, err
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM activities WHERE level='error' AND created_at>=date('now')`).Scan(&d.FailedToday); err != nil {
