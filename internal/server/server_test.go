@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -27,6 +28,10 @@ func (stubRuntime) Descriptors() []connector.Descriptor {
 func (stubRuntime) CreateAccount(domain.AccountInput) (domain.Account, error) {
 	return domain.Account{}, nil
 }
+func (stubRuntime) ImportSession(domain.AccountSessionImport) (domain.Account, error) {
+	return domain.Account{}, nil
+}
+func (stubRuntime) DeleteAccount(string) error { return nil }
 
 func (stubRuntime) Connect(string) error                                      { return nil }
 func (stubRuntime) Disconnect(string) error                                   { return nil }
@@ -35,6 +40,85 @@ func (stubRuntime) SubmitPassword(string, string) error                       { 
 func (stubRuntime) Approve(string) error                                      { return nil }
 func (stubRuntime) SendManual(string, string, domain.ManualDestination) error { return nil }
 func (stubRuntime) ListPeers(string) ([]domain.PeerRef, error)                { return []domain.PeerRef{}, nil }
+
+type importRuntime struct {
+	stubRuntime
+	input domain.AccountSessionImport
+}
+
+func (r *importRuntime) ImportSession(input domain.AccountSessionImport) (domain.Account, error) {
+	r.input = input
+	return domain.Account{ID: "imported", Platform: input.Platform, Name: input.Name, Status: "disconnected"}, nil
+}
+
+func TestImportAccountSessionMultipart(t *testing.T) {
+	t.Parallel()
+	db, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("platform", connector.Telegram); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.WriteField("name", " imported account "); err != nil {
+		t.Fatal(err)
+	}
+	file, err := writer.CreateFormFile("file", "protocol.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte("fixture-zip")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &importRuntime{}
+	server := New(db, nil, runtime, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("ok")}}, slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/accounts/import-session", &body)
+	request.Host = "127.0.0.1:8765"
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if runtime.input.Platform != connector.Telegram || runtime.input.Name != "imported account" || runtime.input.Filename != "protocol.zip" || !bytes.Equal(runtime.input.Data, []byte("fixture-zip")) {
+		t.Fatalf("import input = %#v", runtime.input)
+	}
+}
+
+func TestImportAccountSessionRejectsOversizedRequest(t *testing.T) {
+	t.Parallel()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	file, err := writer.CreateFormFile("file", "protocol.zip")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write(bytes.Repeat([]byte{1}, maxSessionImportSize+(128<<10))); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &importRuntime{}
+	server := New(nil, nil, runtime, fstest.MapFS{"index.html": &fstest.MapFile{Data: []byte("ok")}}, slog.Default())
+	request := httptest.NewRequest(http.MethodPost, "http://127.0.0.1/api/accounts/import-session", &body)
+	request.Host = "127.0.0.1:8765"
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("response = %d %s", response.Code, response.Body.String())
+	}
+	if runtime.input.Data != nil {
+		t.Fatal("runtime received oversized session data")
+	}
+}
 
 func TestLocalHostOnly(t *testing.T) {
 	t.Parallel()

@@ -55,6 +55,8 @@ type CredentialField struct {
 type Adapter interface {
 	Descriptor() Descriptor
 	CreateAccount(input domain.AccountInput) (domain.Account, error)
+	ImportSession(input domain.AccountSessionImport) (domain.Account, error)
+	DeleteAccount(accountID string) error
 	Connect(accountID string) error
 	Disconnect(accountID string) error
 	SubmitCode(accountID, code string) error
@@ -120,6 +122,29 @@ func (r *Registry) CreateAccount(input domain.AccountInput) (domain.Account, err
 		return domain.Account{}, InputError{Message: fmt.Sprintf("connector %q is not installed", platform)}
 	}
 	return adapter.CreateAccount(input)
+}
+
+func (r *Registry) ImportSession(input domain.AccountSessionImport) (domain.Account, error) {
+	platform := input.Platform
+	if platform == "" {
+		platform = Telegram
+		input.Platform = platform
+	}
+	r.mu.RLock()
+	adapter := r.items[platform]
+	r.mu.RUnlock()
+	if adapter == nil {
+		return domain.Account{}, InputError{Message: fmt.Sprintf("connector %q is not installed", platform)}
+	}
+	return adapter.ImportSession(input)
+}
+
+func (r *Registry) DeleteAccount(accountID string) error {
+	adapter, err := r.forAccount(accountID)
+	if err != nil {
+		return err
+	}
+	return adapter.DeleteAccount(accountID)
 }
 
 func (r *Registry) Disconnect(accountID string) error {

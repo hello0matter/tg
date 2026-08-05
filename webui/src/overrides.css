@@ -50,6 +50,17 @@
   overflow-wrap: anywhere;
 }
 
+.file-input { height: auto; min-height: 42px; padding: 7px; }
+.file-input::file-selector-button {
+  height: 27px; margin-right: 10px; border: 1px solid #d4d4d8; border-radius: 4px;
+  background: #f8f9fa; color: #3f3f46; cursor: pointer;
+}
+.import-warning { display: flex; gap: 10px; padding: 12px; border: 1px solid #c8eadb; border-radius: 5px; background: #effaf5; color: #166044; }
+.import-warning > svg { width: 18px; flex: none; }
+.import-warning strong, .import-warning span { display: block; }
+.import-warning strong { font-size: 12px; }
+.import-warning span { margin-top: 4px; font-size: 10px; line-height: 1.6; color: #39725c; }
+
 .peer-input {
   grid-template-columns: minmax(0, 1fr) minmax(100px, 0.65fr) minmax(0, 1fr) auto;
 }

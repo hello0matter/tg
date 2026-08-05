@@ -36,6 +36,10 @@ func (f *fakeAdapter) Descriptor() Descriptor {
 func (f *fakeAdapter) CreateAccount(input domain.AccountInput) (domain.Account, error) {
 	return domain.Account{ID: "created", Platform: input.Platform, Name: input.Name}, nil
 }
+func (f *fakeAdapter) ImportSession(input domain.AccountSessionImport) (domain.Account, error) {
+	return domain.Account{ID: "imported", Platform: input.Platform, Name: input.Name}, nil
+}
+func (f *fakeAdapter) DeleteAccount(string) error                                { return nil }
 func (f *fakeAdapter) Connect(accountID string) error                            { f.connected = accountID; return nil }
 func (f *fakeAdapter) Disconnect(string) error                                   { return nil }
 func (f *fakeAdapter) SubmitCode(string, string) error                           { return nil }

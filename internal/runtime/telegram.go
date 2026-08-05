@@ -74,6 +74,7 @@ type adminCache struct {
 type accountSession struct {
 	accountID string
 	cancel    context.CancelCauseFunc
+	done      chan struct{}
 	auth      *webAuthenticator
 
 	mu     sync.RWMutex
@@ -196,6 +197,28 @@ func (m *Manager) CreateAccount(input domain.AccountInput) (domain.Account, erro
 	return m.store.SaveAccount(input, encrypted)
 }
 
+func (m *Manager) DeleteAccount(accountID string) error {
+	m.mu.RLock()
+	s, connected := m.sessions[accountID]
+	m.mu.RUnlock()
+	if connected {
+		s.cancel(errAccountDisconnected)
+		select {
+		case <-s.done:
+		case <-time.After(telegramInitialConnectionTimeout):
+			return errors.New("等待 Telegram 连接停止超时，账号未删除")
+		}
+	}
+	if err := m.store.DeleteAccount(accountID); err != nil {
+		return err
+	}
+	path := filepath.Join(m.dataDir, "sessions", accountID+".session")
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("删除账号会话: %w", err)
+	}
+	return nil
+}
+
 func (m *Manager) Connect(accountID string) error {
 	m.mu.Lock()
 	if _, exists := m.sessions[accountID]; exists {
@@ -217,6 +240,7 @@ func (m *Manager) Connect(accountID string) error {
 	s := &accountSession{
 		accountID: accountID,
 		cancel:    cancel,
+		done:      make(chan struct{}),
 		peers:     make(map[int64]tg.InputPeerClass),
 		info:      make(map[int64]domain.PeerRef),
 	}
@@ -235,7 +259,10 @@ func (m *Manager) Connect(accountID string) error {
 		m.remove(accountID)
 		return err
 	}
-	go m.run(ctx, account, apiHash, s)
+	go func() {
+		defer close(s.done)
+		m.run(ctx, account, apiHash, s)
+	}()
 	return nil
 }
 

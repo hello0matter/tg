@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,11 +27,14 @@ import (
 const (
 	aiAPIKeySecret        = "ai_api_key"
 	telegramAPIHashSecret = "telegram_api_hash"
+	maxSessionImportSize  = 2 << 20
 )
 
 type Runtime interface {
 	Descriptors() []connector.Descriptor
 	CreateAccount(input domain.AccountInput) (domain.Account, error)
+	ImportSession(input domain.AccountSessionImport) (domain.Account, error)
+	DeleteAccount(accountID string) error
 	Connect(accountID string) error
 	Disconnect(accountID string) error
 	SubmitCode(accountID, code string) error
@@ -61,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/connectors", s.connectors)
 	mux.HandleFunc("GET /api/accounts", s.accounts)
 	mux.HandleFunc("POST /api/accounts", s.createAccount)
+	mux.HandleFunc("POST /api/accounts/import-session", s.importAccountSession)
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.deleteAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/connect", s.connectAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/disconnect", s.disconnectAccount)
@@ -130,9 +136,44 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	writeInternal(w, err)
 }
 
+func (s *Server) importAccountSession(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSessionImportSize+(64<<10))
+	if err := r.ParseMultipartForm(maxSessionImportSize); err != nil {
+		writeError(w, http.StatusBadRequest, "协议包无效或超过 2 MiB")
+		return
+	}
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "请选择 Telethon 协议 ZIP")
+		return
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxSessionImportSize+1))
+	if err != nil || len(data) == 0 || len(data) > maxSessionImportSize {
+		writeError(w, http.StatusBadRequest, "协议包无效或超过 2 MiB")
+		return
+	}
+	account, err := s.runtime.ImportSession(domain.AccountSessionImport{
+		Platform: strings.TrimSpace(r.FormValue("platform")),
+		Name:     strings.TrimSpace(r.FormValue("name")),
+		Filename: filepath.Base(header.Filename),
+		Data:     data,
+	})
+	if err == nil {
+		s.record("info", "account", "已安全导入 "+account.Platform+" 协议账号 "+account.Name, "")
+		writeJSON(w, http.StatusCreated, account)
+		return
+	}
+	var inputErr connector.InputError
+	if errors.As(err, &inputErr) {
+		writeError(w, http.StatusBadRequest, inputErr.Error())
+		return
+	}
+	writeInternal(w, err)
+}
+
 func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
-	_ = s.runtime.Disconnect(r.PathValue("id"))
-	err := s.store.DeleteAccount(r.PathValue("id"))
+	err := s.runtime.DeleteAccount(r.PathValue("id"))
 	if err == nil {
 		s.record("info", "account", "已删除平台账号", "")
 	}

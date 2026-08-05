@@ -31,6 +31,15 @@ type AccountInput struct {
 	ConnectorSecrets map[string]string `json:"connectorSecrets"`
 }
 
+// AccountSessionImport carries an exported platform session into its connector.
+// Data is transient and must never be persisted or logged in plaintext.
+type AccountSessionImport struct {
+	Platform string
+	Name     string
+	Filename string
+	Data     []byte
+}
+
 type PeerRef struct {
 	Platform    string `json:"platform"`
 	ConnectorID string `json:"connectorId"`

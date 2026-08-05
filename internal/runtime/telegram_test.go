@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -116,6 +117,42 @@ func TestDuplicateConnectIsRejectedWithoutStartingAnotherLogin(t *testing.T) {
 	var inputErr connector.InputError
 	if !errors.As(err, &inputErr) {
 		t.Fatalf("error = %T, want connector.InputError", err)
+	}
+}
+
+func TestDeleteAccountWaitsForActiveSessionAndRemovesSessionFile(t *testing.T) {
+	manager, db, _ := newCredentialTestManager(t)
+	saveGlobalTelegramCredentials(t, db, manager.vault, 123456, "global-hash")
+	account, err := manager.CreateAccount(domain.AccountInput{Name: "delete", Phone: "+10000000000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan struct{})
+	manager.sessions[account.ID] = &accountSession{cancel: cancel, done: done}
+	sessionPath := filepath.Join(manager.dataDir, "sessions", account.ID+".session")
+	if err := os.MkdirAll(filepath.Dir(sessionPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(sessionPath, []byte("encrypted fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		<-ctx.Done()
+		manager.remove(account.ID)
+		close(done)
+	}()
+	if err := manager.DeleteAccount(account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if !errors.Is(context.Cause(ctx), errAccountDisconnected) {
+		t.Fatalf("cancel cause = %v", context.Cause(ctx))
+	}
+	if _, err := os.Stat(sessionPath); !os.IsNotExist(err) {
+		t.Fatalf("session still exists: %v", err)
+	}
+	if _, _, err := db.AccountCredentials(account.ID); err == nil {
+		t.Fatal("account still exists")
 	}
 }
 
