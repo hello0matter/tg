@@ -28,19 +28,20 @@ func TestRouteAndRuleRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected accounts: %#v, %v", accounts, err)
 	}
 	route, err := s.SaveRoute(domain.Route{
-		Name:             "商品群镜像",
-		AccountID:        account.ID,
-		Sources:          []domain.PeerRef{{ChatID: -1001, TopicID: 2, Title: "来源"}},
-		Targets:          []domain.PeerRef{{ChatID: -1002, TopicID: 3, Title: "目标"}},
-		Mode:             "copy",
-		Enabled:          true,
-		SenderAccountIDs: []string{account.ID, "backup"},
-		SenderFilterMode: "admins_and_allowlist",
-		AllowedSenderIDs: []int64{42},
-		IncludeBots:      true,
-		ButtonPolicy:     "as_text",
-		AIEnabled:        true,
-		AIPrompt:         "replace supplier brand",
+		Name:               "商品群镜像",
+		AccountID:          account.ID,
+		Sources:            []domain.PeerRef{{ChatID: -1001, TopicID: 2, Title: "来源"}},
+		Targets:            []domain.PeerRef{{ChatID: -1002, TopicID: 3, Title: "目标"}},
+		Mode:               "copy",
+		Enabled:            true,
+		SenderAccountIDs:   []string{account.ID, "backup"},
+		SenderFilterMode:   "admins_and_allowlist",
+		AllowedSenderIDs:   []int64{42},
+		IncludeBots:        true,
+		ReverseOwnMessages: true,
+		ButtonPolicy:       "as_text",
+		AIEnabled:          true,
+		AIPrompt:           "replace supplier brand",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -50,7 +51,7 @@ func TestRouteAndRuleRoundTrip(t *testing.T) {
 	}
 
 	routes, err := s.ListRoutes()
-	if err != nil || len(routes) != 1 || routes[0].Sources[0].TopicID != 2 || routes[0].Sources[0].Platform != domain.PlatformTelegram || routes[0].SenderAccountIDs[1] != "backup" || routes[0].AllowedSenderIDs[0] != 42 || routes[0].AIPrompt != "replace supplier brand" {
+	if err != nil || len(routes) != 1 || routes[0].Sources[0].TopicID != 2 || routes[0].Sources[0].Platform != domain.PlatformTelegram || routes[0].SenderAccountIDs[1] != "backup" || routes[0].AllowedSenderIDs[0] != 42 || !routes[0].ReverseOwnMessages || routes[0].AIPrompt != "replace supplier brand" {
 		t.Fatalf("unexpected routes: %#v, %v", routes, err)
 	}
 	rules, err := s.ListRules(route.ID)

@@ -171,6 +171,49 @@ func TestHandleNewChannelMessageWithoutRoutes(t *testing.T) {
 	}
 }
 
+func TestTargetMessageIsQueuedBackToSourceAndMappedMessagesAreSkipped(t *testing.T) {
+	manager, db, _ := newCredentialTestManager(t)
+	manager.queueCancel()
+	_, err := db.SaveRoute(domain.Route{
+		ID:                 "route",
+		Name:               "mirror",
+		AccountID:          "account",
+		SenderAccountIDs:   []string{"account"},
+		Sources:            []domain.PeerRef{{ChatID: -1001}},
+		Targets:            []domain.PeerRef{{ChatID: -1002}},
+		Mode:               "copy",
+		ReviewMode:         "rules",
+		ReverseOwnMessages: true,
+		Enabled:            true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := &accountSession{accountID: "account", peers: make(map[int64]tg.InputPeerClass), info: make(map[int64]domain.PeerRef)}
+	message := &tg.Message{ID: 10, PeerID: &tg.PeerChat{ChatID: 1002}, FromID: &tg.PeerUser{UserID: 42}, Message: "reverse marker"}
+	if err := manager.handleIncomingMessage(context.Background(), session, tg.Entities{}, message); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err := db.ListOutbox("", 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("reverse jobs = %#v, %v", jobs, err)
+	}
+	if jobs[0].Target.ChatID != -1001 || jobs[0].SourceChatID != -1002 || jobs[0].SourceMessageID != 10 || jobs[0].Text != "reverse marker" {
+		t.Fatalf("unexpected reverse job: %#v", jobs[0])
+	}
+	if err := db.SaveMessageMapping(domain.MessageMapping{RouteID: "route", SourceChatID: -1001, SourceMessageID: 1, TargetChatID: -1002, TargetMessageID: 11}); err != nil {
+		t.Fatal(err)
+	}
+	mapped := &tg.Message{ID: 11, PeerID: &tg.PeerChat{ChatID: 1002}, FromID: &tg.PeerUser{UserID: 42}, Message: "must not loop"}
+	if err := manager.handleIncomingMessage(context.Background(), session, tg.Entities{}, mapped); err != nil {
+		t.Fatal(err)
+	}
+	jobs, err = db.ListOutbox("", 10)
+	if err != nil || len(jobs) != 1 {
+		t.Fatalf("mapped message should not enqueue another job: %#v, %v", jobs, err)
+	}
+}
+
 func TestCacheKeepsKnownChannelAccessHashForMinimalUpdates(t *testing.T) {
 	chatID := int64(-1_000_000_000_042)
 	session := &accountSession{

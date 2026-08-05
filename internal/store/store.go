@@ -312,17 +312,18 @@ func (s *Store) ListRoutes() ([]domain.Route, error) {
 }
 
 type routeConfig struct {
-	SenderAccountIDs []string `json:"senderAccountIds"`
-	SenderFilterMode string   `json:"senderFilterMode"`
-	AllowedSenderIDs []int64  `json:"allowedSenderIds"`
-	IncludeBots      bool     `json:"includeBots"`
-	ButtonPolicy     string   `json:"buttonPolicy"`
-	AIEnabled        bool     `json:"aiEnabled"`
-	AIPrompt         string   `json:"aiPrompt"`
+	SenderAccountIDs   []string `json:"senderAccountIds"`
+	SenderFilterMode   string   `json:"senderFilterMode"`
+	AllowedSenderIDs   []int64  `json:"allowedSenderIds"`
+	IncludeBots        bool     `json:"includeBots"`
+	ReverseOwnMessages bool     `json:"reverseOwnMessages"`
+	ButtonPolicy       string   `json:"buttonPolicy"`
+	AIEnabled          bool     `json:"aiEnabled"`
+	AIPrompt           string   `json:"aiPrompt"`
 }
 
 func routeConfigFrom(route domain.Route) routeConfig {
-	return routeConfig{SenderAccountIDs: route.SenderAccountIDs, SenderFilterMode: route.SenderFilterMode, AllowedSenderIDs: route.AllowedSenderIDs, IncludeBots: route.IncludeBots, ButtonPolicy: route.ButtonPolicy, AIEnabled: route.AIEnabled, AIPrompt: route.AIPrompt}
+	return routeConfig{SenderAccountIDs: route.SenderAccountIDs, SenderFilterMode: route.SenderFilterMode, AllowedSenderIDs: route.AllowedSenderIDs, IncludeBots: route.IncludeBots, ReverseOwnMessages: route.ReverseOwnMessages, ButtonPolicy: route.ButtonPolicy, AIEnabled: route.AIEnabled, AIPrompt: route.AIPrompt}
 }
 
 func (c routeConfig) apply(route *domain.Route) {
@@ -330,6 +331,7 @@ func (c routeConfig) apply(route *domain.Route) {
 	route.SenderFilterMode = c.SenderFilterMode
 	route.AllowedSenderIDs = c.AllowedSenderIDs
 	route.IncludeBots = c.IncludeBots
+	route.ReverseOwnMessages = c.ReverseOwnMessages
 	route.ButtonPolicy = c.ButtonPolicy
 	route.AIEnabled = c.AIEnabled
 	route.AIPrompt = c.AIPrompt

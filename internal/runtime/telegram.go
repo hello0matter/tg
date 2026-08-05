@@ -823,7 +823,7 @@ func (m *Manager) handleIncomingMessage(ctx context.Context, s *accountSession, 
 	}
 	topicID := messageTopic(msg)
 	if msg.Out {
-		return m.handleOwnTargetMessage(ctx, s, entities, msg, chatID, topicID)
+		return m.handleTargetMessage(ctx, s, entities, msg, chatID, topicID)
 	}
 	routes, err := m.store.ListRoutes()
 	if err != nil {
@@ -854,10 +854,10 @@ func (m *Manager) handleIncomingMessage(ctx context.Context, s *accountSession, 
 			m.activity("error", "send", "线路发送失败: "+err.Error(), route.ID)
 		}
 	}
-	return nil
+	return m.handleTargetMessage(ctx, s, entities, msg, chatID, topicID)
 }
 
-func (m *Manager) handleOwnTargetMessage(ctx context.Context, s *accountSession, entities tg.Entities, msg *tg.Message, chatID int64, topicID int) error {
+func (m *Manager) handleTargetMessage(ctx context.Context, s *accountSession, entities tg.Entities, msg *tg.Message, chatID int64, topicID int) error {
 	mapped, err := m.store.IsMappedTargetMessage(chatID, msg.ID)
 	if err != nil || mapped {
 		return err
