@@ -141,6 +141,22 @@ func TestSentOutboxCountSince(t *testing.T) {
 	}
 }
 
+func TestIsMappedTargetMessage(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.SaveMessageMapping(domain.MessageMapping{RouteID: "route", SourceChatID: -1, SourceMessageID: 10, TargetChatID: -2, TargetMessageID: 20}); err != nil {
+		t.Fatal(err)
+	}
+	mapped, err := s.IsMappedTargetMessage(-2, 20)
+	if err != nil || !mapped {
+		t.Fatalf("mapped target = %v, %v", mapped, err)
+	}
+}
+
 func TestSettingsScrubTelegramAPIHash(t *testing.T) {
 	t.Parallel()
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))

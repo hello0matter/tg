@@ -41,26 +41,27 @@ type PeerRef struct {
 }
 
 type Route struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	AccountID        string    `json:"accountId"`
-	SenderAccountIDs []string  `json:"senderAccountIds"`
-	Sources          []PeerRef `json:"sources"`
-	Targets          []PeerRef `json:"targets"`
-	Mode             string    `json:"mode"`
-	ReviewMode       string    `json:"reviewMode"`
-	SenderFilterMode string    `json:"senderFilterMode"`
-	AllowedSenderIDs []int64   `json:"allowedSenderIds"`
-	IncludeBots      bool      `json:"includeBots"`
-	ButtonPolicy     string    `json:"buttonPolicy"`
-	AIEnabled        bool      `json:"aiEnabled"`
-	AIPrompt         string    `json:"aiPrompt"`
-	Enabled          bool      `json:"enabled"`
-	SyncEdits        bool      `json:"syncEdits"`
-	SyncDeletes      bool      `json:"syncDeletes"`
-	SyncReactions    bool      `json:"syncReactions"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID                 string    `json:"id"`
+	Name               string    `json:"name"`
+	AccountID          string    `json:"accountId"`
+	SenderAccountIDs   []string  `json:"senderAccountIds"`
+	Sources            []PeerRef `json:"sources"`
+	Targets            []PeerRef `json:"targets"`
+	Mode               string    `json:"mode"`
+	ReviewMode         string    `json:"reviewMode"`
+	SenderFilterMode   string    `json:"senderFilterMode"`
+	AllowedSenderIDs   []int64   `json:"allowedSenderIds"`
+	IncludeBots        bool      `json:"includeBots"`
+	ReverseOwnMessages bool      `json:"reverseOwnMessages"`
+	ButtonPolicy       string    `json:"buttonPolicy"`
+	AIEnabled          bool      `json:"aiEnabled"`
+	AIPrompt           string    `json:"aiPrompt"`
+	Enabled            bool      `json:"enabled"`
+	SyncEdits          bool      `json:"syncEdits"`
+	SyncDeletes        bool      `json:"syncDeletes"`
+	SyncReactions      bool      `json:"syncReactions"`
+	CreatedAt          time.Time `json:"createdAt"`
+	UpdatedAt          time.Time `json:"updatedAt"`
 }
 
 type Rule struct {

@@ -813,7 +813,7 @@ func (m *Manager) handleNewChannelMessage(ctx context.Context, s *accountSession
 
 func (m *Manager) handleIncomingMessage(ctx context.Context, s *accountSession, entities tg.Entities, message tg.MessageClass) error {
 	msg, ok := message.(*tg.Message)
-	if !ok || msg.Out {
+	if !ok {
 		return nil
 	}
 	s.cacheEntities(entities)
@@ -822,6 +822,9 @@ func (m *Manager) handleIncomingMessage(ctx context.Context, s *accountSession, 
 		return nil
 	}
 	topicID := messageTopic(msg)
+	if msg.Out {
+		return m.handleOwnTargetMessage(ctx, s, entities, msg, chatID, topicID)
+	}
 	routes, err := m.store.ListRoutes()
 	if err != nil {
 		return err
@@ -849,6 +852,28 @@ func (m *Manager) handleIncomingMessage(ctx context.Context, s *accountSession, 
 		}
 		if err := m.processRoute(ctx, s, route, msg, chatID, topicID, entities); err != nil {
 			m.activity("error", "send", "线路发送失败: "+err.Error(), route.ID)
+		}
+	}
+	return nil
+}
+
+func (m *Manager) handleOwnTargetMessage(ctx context.Context, s *accountSession, entities tg.Entities, msg *tg.Message, chatID int64, topicID int) error {
+	mapped, err := m.store.IsMappedTargetMessage(chatID, msg.ID)
+	if err != nil || mapped {
+		return err
+	}
+	routes, err := m.store.ListRoutes()
+	if err != nil {
+		return err
+	}
+	for _, route := range routes {
+		if !route.Enabled || !route.ReverseOwnMessages || route.AccountID != s.accountID || !matchesSource(route.Targets, chatID, topicID) {
+			continue
+		}
+		reversed := route
+		reversed.Sources, reversed.Targets = route.Targets, route.Sources
+		if err := m.processRoute(ctx, s, reversed, msg, chatID, topicID, entities); err != nil {
+			m.activity("error", "reverse", "回传消息失败: "+err.Error(), route.ID)
 		}
 	}
 	return nil

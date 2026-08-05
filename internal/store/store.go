@@ -582,6 +582,12 @@ func (s *Store) MessageMappings(sourceChatID int64, sourceMessageID int) ([]doma
 	return result, rows.Err()
 }
 
+func (s *Store) IsMappedTargetMessage(chatID int64, messageID int) (bool, error) {
+	var exists bool
+	err := s.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM message_map WHERE target_chat_id=? AND target_message_id=?)`, chatID, messageID).Scan(&exists)
+	return exists, err
+}
+
 func (s *Store) DeleteMessageMapping(mapping domain.MessageMapping) error {
 	_, err := s.db.Exec(`DELETE FROM message_map WHERE route_id=? AND source_chat_id=? AND source_message_id=? AND target_chat_id=?`,
 		mapping.RouteID, mapping.SourceChatID, mapping.SourceMessageID, mapping.TargetChatID)
