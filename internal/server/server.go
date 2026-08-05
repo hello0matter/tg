@@ -178,6 +178,12 @@ func validateRoute(route *domain.Route) error {
 		return errors.New("至少需要一个来源和一个目标")
 	}
 	for i := range route.Sources {
+		if route.Sources[i].ChatID == 0 {
+			return errors.New("来源 Chat ID 不能为空，请选择已加载的群或填写数字 Chat ID")
+		}
+		if route.Sources[i].TopicID < 0 {
+			return errors.New("来源话题 ID 不能为负数")
+		}
 		if route.Sources[i].Platform == "" {
 			route.Sources[i].Platform = connector.Telegram
 		}
@@ -186,6 +192,12 @@ func validateRoute(route *domain.Route) error {
 		}
 	}
 	for i := range route.Targets {
+		if route.Targets[i].ChatID == 0 {
+			return errors.New("目标 Chat ID 不能为空，请选择已加载的群或填写数字 Chat ID")
+		}
+		if route.Targets[i].TopicID < 0 {
+			return errors.New("目标话题 ID 不能为负数")
+		}
 		if route.Targets[i].Platform == "" {
 			route.Targets[i].Platform = connector.Telegram
 		}

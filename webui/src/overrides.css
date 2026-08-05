@@ -49,3 +49,28 @@
   color: inherit;
   overflow-wrap: anywhere;
 }
+
+.peer-input {
+  grid-template-columns: minmax(0, 1fr) minmax(100px, 0.65fr) minmax(0, 1fr) auto;
+}
+.peer-input .peer-search,
+.peer-input .peer-picker,
+.peer-input .peer-manual {
+  grid-column: 1 / -1;
+}
+.peer-input .peer-picker {
+  height: 34px;
+  font-size: 11px;
+}
+.peer-input .peer-topic {
+  grid-column: 1;
+}
+.peer-input .peer-title {
+  grid-column: 2 / span 2;
+}
+
+@media (max-width: 580px) {
+  .peer-input .peer-title {
+    grid-column: 1 / -1;
+  }
+}

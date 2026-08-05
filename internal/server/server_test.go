@@ -74,6 +74,34 @@ func TestValidateLocalAddress(t *testing.T) {
 	}
 }
 
+func TestValidateRouteRequiresNumericPeerIDs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		route domain.Route
+		want  string
+	}{
+		{
+			name:  "missing source ID",
+			route: domain.Route{AccountID: "account", Name: "route", Sources: []domain.PeerRef{{}}, Targets: []domain.PeerRef{{ChatID: -1002}}},
+			want:  "来源 Chat ID",
+		},
+		{
+			name:  "missing target ID",
+			route: domain.Route{AccountID: "account", Name: "route", Sources: []domain.PeerRef{{ChatID: -1001}}, Targets: []domain.PeerRef{{}}},
+			want:  "目标 Chat ID",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateRoute(&test.route)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateRoute() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestTelegramAPIHashIsEncryptedPreservedAndNotReturned(t *testing.T) {
 	dataDir := t.TempDir()
 	db, err := store.Open(filepath.Join(dataDir, "test.db"))
