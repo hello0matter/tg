@@ -80,7 +80,9 @@ API ID/Hash 标识的是 TG Workbench 使用的 Telegram 客户端应用，不�
 
 “平台账号 → 导入协议包”只接受不超过 2 MiB 的 ZIP，包内必须恰好有一个标准 Telethon SQLite `.session` 和一个 JSON。JSON 需包含 `phone`、`app_id`、`app_hash`。工作台会拒绝路径穿越、多 Session、额外可执行文件、损坏 SQLite、异常 DC/端口和非 256 字节授权密钥。
 
-导入只在本机完成：临时明文 Session 校验后立即删除，最终 gotd Session 和 API Hash 都进入 Vault 加密存储。导入不会自动连接 Telegram；请先在 Telegram“设置 → 设备”终止卖家或其他未知会话，再手动点“连接”。删除账号时会先停止连接，再同时清理数据库记录和加密 Session。直登包 `tdata` 不属于 Telethon 格式，不能在这里导入。
+导入只在本机完成：临时明文 Session 校验后立即删除，最终 gotd Session 和 API Hash 都进入 Vault 加密存储。导入不会自动连接 Telegram。删除账号时会先停止连接，再同时清理数据库记录和加密 Session。直登包 `tdata` 不属于 Telethon 格式，不能在这里导入。
+
+购买的协议包可能被卖家复制；两份副本共用同一个 `auth_key` 时，Telegram 设备列表未必能把它们显示成两个可区分的设备。安全迁移方式是：先确认手机号、恢复邮箱和两步验证都由自己控制；协议包只用于临时取得访问权；随后删除导入账号，通过“添加账号”和正常验证码为 TG Workbench 建立全新的 Session，再从可信客户端撤销旧授权。撤销旧授权也会使所有旧副本失效。无法掌控手机号或恢复方式的购买账号不应承载客户隐私、收款或长期业务资产。
 
 ## AI 处理顺序
 
