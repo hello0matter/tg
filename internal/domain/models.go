@@ -165,8 +165,15 @@ type Settings struct {
 	OpenBrowser      bool             `json:"openBrowser"`
 	StartWithWindows bool             `json:"startWithWindows"`
 	ProxyURL         string           `json:"proxyUrl"`
+	Delivery         DeliverySettings `json:"delivery"`
 	Telegram         TelegramSettings `json:"telegram"`
 	AI               AISettings       `json:"ai"`
+}
+
+type DeliverySettings struct {
+	Paused             bool `json:"paused"`
+	MinIntervalSeconds int  `json:"minIntervalSeconds"`
+	DailyLimit         int  `json:"dailyLimit"`
 }
 
 type TelegramSettings struct {

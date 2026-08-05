@@ -116,6 +116,31 @@ func TestOutboxClaimsOnlyRequestedPlatform(t *testing.T) {
 	}
 }
 
+func TestSentOutboxCountSince(t *testing.T) {
+	t.Parallel()
+	s, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.EnqueueOutbox([]domain.OutboxJob{{
+		RouteID: "r", Target: domain.PeerRef{ChatID: -1}, Text: "sent", OrderKey: "-1:0", DedupeKey: "sent", SenderAccountIDs: []string{"account"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	job, err := s.ClaimOutbox(domain.PlatformTelegram, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CompleteOutbox(job.ID, "account"); err != nil {
+		t.Fatal(err)
+	}
+	count, err := s.SentOutboxCountSince("account", time.Now().Add(-time.Minute))
+	if err != nil || count != 1 {
+		t.Fatalf("sent outbox count = %d, %v", count, err)
+	}
+}
+
 func TestSettingsScrubTelegramAPIHash(t *testing.T) {
 	t.Parallel()
 	s, err := Open(filepath.Join(t.TempDir(), "test.db"))

@@ -60,6 +60,9 @@ type Manager struct {
 	adminMu    sync.Mutex
 	admins     map[string]adminCache
 	cooldown   map[string]time.Time
+	deliveryMu sync.Mutex
+	delivery   map[string]*sync.Mutex
+	lastSent   map[string]time.Time
 	roundRobin int
 }
 
@@ -113,6 +116,8 @@ func NewManager(dataDir string, store *store.Store, vault *vault.Vault, log *slo
 		albums:      make(map[string]*pendingAlbum),
 		admins:      make(map[string]adminCache),
 		cooldown:    make(map[string]time.Time),
+		delivery:    make(map[string]*sync.Mutex),
+		lastSent:    make(map[string]time.Time),
 		queueCancel: queueCancel,
 	}
 	for range 4 {
@@ -510,6 +515,14 @@ func (m *Manager) outboxWorker(ctx context.Context) {
 			return
 		case <-ticker.C:
 		}
+		settings, err := m.store.Settings()
+		if err != nil {
+			m.log.Error("read delivery settings", "error", err)
+			continue
+		}
+		if settings.Delivery.Paused {
+			continue
+		}
 		job, err := m.store.ClaimOutbox(connector.Telegram, 2*time.Minute)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -528,11 +541,53 @@ func (m *Manager) processOutbox(ctx context.Context, job domain.OutboxJob) {
 		_ = m.store.DeferOutbox(job.ID, "账号池暂无可写入该目标的在线账号", time.Now().Add(5*time.Second))
 		return
 	}
+	m.deliveryMu.Lock()
+	lock := m.delivery[accountID]
+	if lock == nil {
+		lock = new(sync.Mutex)
+		m.delivery[accountID] = lock
+	}
+	m.deliveryMu.Unlock()
+	lock.Lock()
+	defer lock.Unlock()
+
+	settings, err := m.store.Settings()
+	if err != nil {
+		_ = m.store.RetryOutbox(job.ID, accountID, err.Error(), time.Now().Add(time.Second), false)
+		return
+	}
+	if settings.Delivery.Paused {
+		_ = m.store.DeferOutbox(job.ID, "发送队列已暂停", time.Now().Add(time.Second))
+		return
+	}
+	now := time.Now()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	sentToday, err := m.store.SentOutboxCountSince(accountID, startOfDay)
+	if err != nil {
+		_ = m.store.RetryOutbox(job.ID, accountID, err.Error(), now.Add(time.Second), false)
+		return
+	}
+	if sentToday >= settings.Delivery.DailyLimit {
+		nextDay := startOfDay.AddDate(0, 0, 1)
+		_ = m.store.DeferOutbox(job.ID, "已达到该账号每日发送上限", nextDay)
+		m.activity("warning", "delivery", "已达到账号每日发送上限，任务将在次日继续", job.RouteID)
+		return
+	}
+	m.deliveryMu.Lock()
+	lastSent := m.lastSent[accountID]
+	m.deliveryMu.Unlock()
+	if availableAt := lastSent.Add(time.Duration(settings.Delivery.MinIntervalSeconds) * time.Second); availableAt.After(now) {
+		_ = m.store.DeferOutbox(job.ID, "等待账号发送间隔", availableAt)
+		return
+	}
 	sendCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
 	defer cancel()
-	err := m.sendQueuedText(sendCtx, session, job)
+	err = m.sendQueuedText(sendCtx, session, job)
 	if err == nil {
 		_ = m.store.CompleteOutbox(job.ID, accountID)
+		m.deliveryMu.Lock()
+		m.lastSent[accountID] = time.Now()
+		m.deliveryMu.Unlock()
 		m.activity("info", "sent", "已通过账号池同步到 "+displayPeer(job.Target), job.RouteID)
 		return
 	}

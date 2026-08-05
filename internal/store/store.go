@@ -121,7 +121,7 @@ CREATE TABLE IF NOT EXISTS outbox_jobs (
 		return err
 	}
 	if count == 0 {
-		settings := domain.Settings{ListenAddress: "127.0.0.1:8765", RetentionDays: 30, MediaCacheMB: 2048, OpenBrowser: true, AI: domain.AISettings{BaseURL: "https://api.openai.com/v1", Model: "gpt-4.1-mini", TimeoutSeconds: 30, FailurePolicy: "review", MaxInputChars: 12000}}
+		settings := domain.Settings{ListenAddress: "127.0.0.1:8765", RetentionDays: 30, MediaCacheMB: 2048, OpenBrowser: true, Delivery: domain.DeliverySettings{MinIntervalSeconds: 3, DailyLimit: 300}, AI: domain.AISettings{BaseURL: "https://api.openai.com/v1", Model: "gpt-4.1-mini", TimeoutSeconds: 30, FailurePolicy: "review", MaxInputChars: 12000}}
 		if err := s.SaveSettings(settings); err != nil {
 			return err
 		}
@@ -513,6 +513,12 @@ func (s *Store) Settings() (domain.Settings, error) {
 	if value.AI.MaxInputChars == 0 {
 		value.AI.MaxInputChars = 12000
 	}
+	if value.Delivery.MinIntervalSeconds == 0 {
+		value.Delivery.MinIntervalSeconds = 3
+	}
+	if value.Delivery.DailyLimit == 0 {
+		value.Delivery.DailyLimit = 300
+	}
 	return value, err
 }
 func (s *Store) SaveSettings(value domain.Settings) error {
@@ -673,6 +679,12 @@ func scanOutbox(row rowScanner) (domain.OutboxJob, error) {
 func (s *Store) CompleteOutbox(jobID, accountID string) error {
 	_, err := s.db.Exec(`UPDATE outbox_jobs SET status='sent',assigned_account_id=?,lease_until='',last_error='',updated_at=? WHERE id=?`, accountID, nowText(), jobID)
 	return err
+}
+
+func (s *Store) SentOutboxCountSince(accountID string, since time.Time) (int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT COUNT(*) FROM outbox_jobs WHERE status='sent' AND assigned_account_id=? AND updated_at>=?`, accountID, since.UTC().Format(time.RFC3339Nano)).Scan(&count)
+	return count, err
 }
 
 func (s *Store) DeferOutbox(jobID, message string, availableAt time.Time) error {

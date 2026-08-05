@@ -401,6 +401,10 @@ func (s *Server) saveSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "保留天数或缓存容量无效")
 		return
 	}
+	if value.Delivery.MinIntervalSeconds < 1 || value.Delivery.MinIntervalSeconds > 3600 || value.Delivery.DailyLimit < 1 || value.Delivery.DailyLimit > 100000 {
+		writeError(w, http.StatusBadRequest, "发送保护参数无效")
+		return
+	}
 	if err := validateLocalAddress(value.ListenAddress); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
