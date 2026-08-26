@@ -34,6 +34,7 @@
 - OpenAI 兼容的全局 AI 内容处理：加密 API Key、可编辑全局/线路提示词、严格 JSON 决策、失败转审核或原规则发送
 - 来源编辑和删除同步，持久化来源到目标的消息 ID 映射
 - 账号对话同步、状态监控、操作日志和 Windows 自动启动
+- 账号详情查看（手机号、用户名、User ID、API ID、凭证来源、时间和错误）与 Saved Messages 识别通知
 - SOCKS5 Telegram 代理
 - 本地 Host 校验、安全响应头、1 MB API 请求限制
 - 全局/账号级 API Hash 和 Telegram session 使用 AES-GCM；主密钥由 Windows DPAPI 绑定到当前用户

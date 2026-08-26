@@ -57,6 +57,8 @@ type Adapter interface {
 	CreateAccount(input domain.AccountInput) (domain.Account, error)
 	ImportSession(input domain.AccountSessionImport) (domain.Account, error)
 	DeleteAccount(accountID string) error
+	// IdentifyAccount sends a low-impact marker to the account's own Saved Messages.
+	IdentifyAccount(accountID string) error
 	Connect(accountID string) error
 	Disconnect(accountID string) error
 	SubmitCode(accountID, code string) error
@@ -145,6 +147,14 @@ func (r *Registry) DeleteAccount(accountID string) error {
 		return err
 	}
 	return adapter.DeleteAccount(accountID)
+}
+
+func (r *Registry) IdentifyAccount(accountID string) error {
+	adapter, err := r.forAccount(accountID)
+	if err != nil {
+		return err
+	}
+	return adapter.IdentifyAccount(accountID)
 }
 
 func (r *Registry) Disconnect(accountID string) error {

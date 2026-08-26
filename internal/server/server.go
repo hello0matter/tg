@@ -35,6 +35,7 @@ type Runtime interface {
 	CreateAccount(input domain.AccountInput) (domain.Account, error)
 	ImportSession(input domain.AccountSessionImport) (domain.Account, error)
 	DeleteAccount(accountID string) error
+	IdentifyAccount(accountID string) error
 	Connect(accountID string) error
 	Disconnect(accountID string) error
 	SubmitCode(accountID, code string) error
@@ -68,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/accounts", s.createAccount)
 	mux.HandleFunc("POST /api/accounts/import-session", s.importAccountSession)
 	mux.HandleFunc("DELETE /api/accounts/{id}", s.deleteAccount)
+	mux.HandleFunc("POST /api/accounts/{id}/identify", s.identifyAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/connect", s.connectAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/disconnect", s.disconnectAccount)
 	mux.HandleFunc("POST /api/accounts/{id}/code", s.submitCode)
@@ -178,6 +180,14 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 		s.record("info", "account", "已删除平台账号", "")
 	}
 	respondEmpty(w, err)
+}
+
+func (s *Server) identifyAccount(w http.ResponseWriter, r *http.Request) {
+	err := s.runtime.IdentifyAccount(r.PathValue("id"))
+	if err == nil {
+		s.record("info", "account", "已向账号 Saved Messages 发送识别通知", "")
+	}
+	respondAccepted(w, err)
 }
 func (s *Server) connectAccount(w http.ResponseWriter, r *http.Request) {
 	respondAccepted(w, s.runtime.Connect(r.PathValue("id")))

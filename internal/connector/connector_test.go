@@ -40,6 +40,7 @@ func (f *fakeAdapter) ImportSession(input domain.AccountSessionImport) (domain.A
 	return domain.Account{ID: "imported", Platform: input.Platform, Name: input.Name}, nil
 }
 func (f *fakeAdapter) DeleteAccount(string) error                                { return nil }
+func (f *fakeAdapter) IdentifyAccount(string) error                              { return nil }
 func (f *fakeAdapter) Connect(accountID string) error                            { f.connected = accountID; return nil }
 func (f *fakeAdapter) Disconnect(string) error                                   { return nil }
 func (f *fakeAdapter) SubmitCode(string, string) error                           { return nil }

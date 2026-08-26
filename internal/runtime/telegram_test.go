@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -117,6 +118,13 @@ func TestDuplicateConnectIsRejectedWithoutStartingAnotherLogin(t *testing.T) {
 	var inputErr connector.InputError
 	if !errors.As(err, &inputErr) {
 		t.Fatalf("error = %T, want connector.InputError", err)
+	}
+}
+
+func TestIdentifyAccountRequiresConnectedSession(t *testing.T) {
+	manager, _, _ := newCredentialTestManager(t)
+	if err := manager.IdentifyAccount("missing"); err == nil || !strings.Contains(err.Error(), "未连接") {
+		t.Fatalf("error = %v, want disconnected account error", err)
 	}
 }
 

@@ -13,6 +13,9 @@ type Noop struct {
 
 func (n *Noop) Connect(string) error    { return errors.New("Telegram 运行时尚未初始化") }
 func (n *Noop) Disconnect(string) error { return nil }
+func (n *Noop) IdentifyAccount(string) error {
+	return errors.New("Telegram 运行时尚未初始化")
+}
 func (n *Noop) SubmitCode(string, string) error {
 	return errors.New("当前没有等待验证码的登录")
 }

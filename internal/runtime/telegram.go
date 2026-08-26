@@ -219,6 +219,47 @@ func (m *Manager) DeleteAccount(accountID string) error {
 	return nil
 }
 
+// IdentifyAccount sends a low-impact marker to the account's Saved Messages.
+// It deliberately bypasses the delivery queue and never targets a group.
+func (m *Manager) IdentifyAccount(accountID string) error {
+	m.mu.RLock()
+	s, connected := m.sessions[accountID]
+	m.mu.RUnlock()
+	if !connected {
+		return errors.New("账号未连接，无法发送识别通知")
+	}
+	s.mu.RLock()
+	client := s.client
+	s.mu.RUnlock()
+	if client == nil {
+		return errors.New("Telegram 客户端尚未就绪")
+	}
+	account, encryptedHash, err := m.store.AccountCredentials(accountID)
+	if err != nil {
+		return fmt.Errorf("读取账号信息: %w", err)
+	}
+	apiID, _, err := m.resolveTelegramCredentials(account, encryptedHash)
+	if err != nil {
+		return fmt.Errorf("读取生效 API ID: %w", err)
+	}
+	username := account.Username
+	if username == "" {
+		username = "(无用户名)"
+	}
+	text := fmt.Sprintf("TG Workbench 账号识别通知\n备注: %s\n手机号: %s\n用户名: @%s\nUser ID: %d\nAPI ID: %d\n本机时间: %s\n\n这是一条发到 Saved Messages 的识别消息。不会进入镜像线路或群组。", account.Name, account.Phone, username, account.UserID, apiID, time.Now().Format("2006-01-02 15:04:05"))
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if _, err := client.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:     &tg.InputPeerSelf{},
+		Message:  text,
+		RandomID: time.Now().UnixNano(),
+	}); err != nil {
+		return fmt.Errorf("发送识别通知: %w", err)
+	}
+	m.activity("info", "account", "已发送账号识别通知: "+account.Name, "")
+	return nil
+}
+
 func (m *Manager) Connect(accountID string) error {
 	m.mu.Lock()
 	if _, exists := m.sessions[accountID]; exists {

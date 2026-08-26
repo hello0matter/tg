@@ -31,7 +31,8 @@ func (stubRuntime) CreateAccount(domain.AccountInput) (domain.Account, error) {
 func (stubRuntime) ImportSession(domain.AccountSessionImport) (domain.Account, error) {
 	return domain.Account{}, nil
 }
-func (stubRuntime) DeleteAccount(string) error { return nil }
+func (stubRuntime) DeleteAccount(string) error   { return nil }
+func (stubRuntime) IdentifyAccount(string) error { return nil }
 
 func (stubRuntime) Connect(string) error                                      { return nil }
 func (stubRuntime) Disconnect(string) error                                   { return nil }
